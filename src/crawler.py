@@ -2,6 +2,8 @@ import asyncio
 import aiohttp
 import logging
 
+from html_parser import HTMLParser
+
 logger = logging.getLogger(__name__)
 
 class AsyncCrawler:
@@ -15,6 +17,7 @@ class AsyncCrawler:
         self.max_concurrent = max_concurrent
         self.semaphore = asyncio.Semaphore(max_concurrent)
         self.session: aiohttp.ClientSession | None = None
+        self.parser = HTMLParser()
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
@@ -92,6 +95,29 @@ class AsyncCrawler:
         contents = await asyncio.gather(*tasks)
 
         return dict(zip(urls, contents))
+
+    async def fetch_and_parse(self, url: str) -> dict:
+        html = await self.fetch_url(url)
+
+        if not html:
+            logger.warning("Не удалось загрузить контент для парсинга: %s", url)
+
+            return {
+                "url": url,
+                "title": "",
+                "text": "",
+                "links": [],
+                "metadata": {},
+                "images": [],
+                "headings": [],
+                "tables": [],
+                "lists": [],
+                "error": "fetch_failed",
+            }
+
+        parsed = await self.parser.parse_html(html, url)
+
+        return parsed
 
     async def close(self) -> None:
         if self.session is not None and not self.session.closed:
