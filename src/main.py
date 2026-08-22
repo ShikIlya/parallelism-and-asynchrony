@@ -226,10 +226,35 @@ async def demo_day2_parsing() -> None:
 
     print_overall_statistics(results)
 
+# --------------------------------------------------------------------------
+# День 3: управление конкурентностью и очередями
+# --------------------------------------------------------------------------
+
+DAY3_URLS = ["https://example.com"]
+
+async def demo_day3_crawling():
+    print("\n" + "#" * 70)
+    print("# ДЕНЬ 3: управление конкурентностью и очередями")
+    print("#" * 70)
+    print(f"Количество URL для обработки: {len(DAY3_URLS)}")
+
+    crawler = AsyncCrawler(max_concurrent=10)
+
+    try:
+        queue = await crawler.crawl(
+            start_urls=DAY3_URLS,
+            max_pages=50,
+            same_domain_only=True,
+        )
+        stats = queue.get_stats()
+        print(f"Обработано: {stats['processed_urls']}, ошибок: {stats['failed_urls']}, скорость: {stats['pages_per_sec']} стр/сек")
+    finally:
+        await crawler.close()
+
 async def main() -> None:
     await demo_day1_loading()
     await demo_day2_parsing()
-
+    await demo_day3_crawling()
 
 if __name__ == "__main__":
     asyncio.run(main())
