@@ -9,26 +9,40 @@ from semaphore_manager import SemaphoreManager
 
 logger = logging.getLogger(__name__)
 
+
 class AsyncCrawler:
     def __init__(
         self,
         max_concurrent: int = 10,
+        max_depth: int = 2,
+        max_per_domain: int = 3,
     ):
         if max_concurrent <= 0:
-           raise ValueError('max_concurrent must be positive')
+            raise ValueError("max_concurrent must be positive")
+
+        if max_depth < 0:
+            raise ValueError("max_depth must be greater than or equal to zero")
 
         self.max_concurrent = max_concurrent
-        self.semaphore = asyncio.Semaphore(max_concurrent)
+        self.max_depth = max_depth
+
         self.session: aiohttp.ClientSession | None = None
         self.parser = HTMLParser()
-        self.semaphore_manager = SemaphoreManager(max_concurrent=max_concurrent)
+        self.semaphore_manager = SemaphoreManager(
+            max_concurrent=max_concurrent,
+            max_per_domain=max_per_domain,
+        )
+
+        self.visited_urls: set[str] = set()
+        self.failed_urls: dict[str, str] = {}
+        self.processed_urls: dict[str, dict] = {}
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
             timeout = aiohttp.ClientTimeout(
                 total=30,
                 connect=10,
-                sock_read=20
+                sock_read=20,
             )
 
             connector = aiohttp.TCPConnector(
@@ -39,63 +53,51 @@ class AsyncCrawler:
             self.session = aiohttp.ClientSession(
                 timeout=timeout,
                 connector=connector,
-                headers={
-                    "User-agent": "AsyncCrawler/1.0"
-                }
+                headers={"User-Agent": "AsyncCrawler/1.0"},
             )
 
         return self.session
 
-
     async def fetch_url(self, url: str) -> str:
-        logger.info('Начало загрузки: %s', url)
+        logger.info("Начало загрузки: %s", url)
 
-        async with self.semaphore:
-            try:
-                session = await self._get_session()
+        try:
+            session = await self._get_session()
 
-                async with session.get(url) as response:
-                    response.raise_for_status()
-                    content = await response.text()
+            async with session.get(url) as response:
+                response.raise_for_status()
+                content = await response.text()
 
                 logger.info(
                     "Успешно загружено: %s, статус: %s",
                     url,
-                    response.status
+                    response.status,
                 )
-
                 return content
 
-            except aiohttp.ClientResponseError as error:
-                logger.warning(
-                    "HTTP-ошибка для %s: %s %s",
-                    url,
-                    error.status,
-                    error.message,
-                )
-                return ""
+        except aiohttp.ClientResponseError as error:
+            logger.warning(
+                "HTTP-ошибка для %s: %s %s",
+                url,
+                error.status,
+                error.message,
+            )
+            return ""
 
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Таймаут при загрузке: %s",
-                    url,
-                )
-                return ""
+        except asyncio.TimeoutError:
+            logger.warning("Таймаут при загрузке: %s", url)
+            return ""
 
-            except aiohttp.ClientError as error:
-                logger.warning(
-                    "Сетевая ошибка для %s: %s",
-                    url,
-                    type(error).__name__,
-                )
-                return ""
+        except aiohttp.ClientError as error:
+            logger.warning(
+                "Сетевая ошибка для %s: %s",
+                url,
+                type(error).__name__,
+            )
+            return ""
 
     async def fetch_urls(self, urls: list[str]) -> dict[str, str]:
-        tasks = [
-            self.fetch_url(url)
-            for url in urls
-        ]
-
+        tasks = [self.fetch_url(url) for url in urls]
         contents = await asyncio.gather(*tasks)
 
         return dict(zip(urls, contents))
@@ -104,8 +106,6 @@ class AsyncCrawler:
         html = await self.fetch_url(url)
 
         if not html:
-            logger.warning("Не удалось загрузить контент для парсинга: %s", url)
-
             return {
                 "url": url,
                 "title": "",
@@ -119,86 +119,174 @@ class AsyncCrawler:
                 "error": "fetch_failed",
             }
 
-        parsed = await self.parser.parse_html(html, url)
+        return await self.parser.parse_html(html, url)
 
-        return parsed
+    def _reset_crawl_state(self) -> None:
+        self.visited_urls.clear()
+        self.failed_urls.clear()
+        self.processed_urls.clear()
+
+    def _is_allowed_url(
+        self,
+        url: str,
+        origin_domain: str,
+        same_domain_only: bool,
+        exclude_patterns: list[str] | None,
+        include_patterns: list[str] | None,
+    ) -> bool:
+        parsed = urlparse(url)
+
+        if parsed.scheme not in {"http", "https"}:
+            return False
+
+        if same_domain_only and parsed.netloc != origin_domain:
+            return False
+
+        if exclude_patterns and any(pattern in url for pattern in exclude_patterns):
+            return False
+
+        if include_patterns and not any(pattern in url for pattern in include_patterns):
+            return False
+
+        return True
+
+    def _print_progress(self, queue: CrawlerQueue) -> None:
+        stats = queue.get_stats()
+        done = len(self.processed_urls)
+
+        print(
+            f"\r📄 Обработано: {done} | "
+            f"⏳ В очереди: {stats['count_queue']} | "
+            f"❌ Ошибок: {len(self.failed_urls)} | "
+            f"⚡ Скорость: {stats['pages_per_sec']:.2f} стр/сек",
+            end="",
+            flush=True,
+        )
 
     async def crawl(
-            self,
-            start_urls: list[str],
-            max_pages: int = 100,
-            max_depth: int = 2,
-            same_domain_only: bool = False,
-            exclude_patterns: list[str] = None,
-            include_patterns: list[str] = None,
-    ):
+        self,
+        start_urls: list[str],
+        max_pages: int = 100,
+        same_domain_only: bool = False,
+        exclude_patterns: list[str] | None = None,
+        include_patterns: list[str] | None = None,
+    ) -> list[dict]:
+        if max_pages <= 0:
+            return []
+
+        self._reset_crawl_state()
+
         queue = CrawlerQueue()
-        depths = {}
-        origin_domains = {}
+        depths: dict[str, int] = {}
+        origin_domains: dict[str, str] = {}
 
         for url in start_urls:
-            queue.add_url(url, 0)
+            if not self._is_allowed_url(
+                url=url,
+                origin_domain=urlparse(url).netloc,
+                same_domain_only=False,
+                exclude_patterns=exclude_patterns,
+                include_patterns=include_patterns,
+            ):
+                continue
+
+            queue.add_url(url)
             depths[url] = 0
             origin_domains[url] = urlparse(url).netloc
 
-        in_flight = {}
+        in_flight: dict[asyncio.Task, str] = {}
 
-        def total_done():
-            return len(queue.processed_urls) + len(queue.failed_urls)
-
-        while total_done() < max_pages:
-            while len(in_flight) < self.max_concurrent and total_done() + len(in_flight) < max_pages:
+        while (
+            len(self.processed_urls) + len(self.failed_urls) < max_pages
+        ):
+            while (
+                len(in_flight) < self.max_concurrent
+                and len(self.processed_urls)
+                + len(self.failed_urls)
+                + len(in_flight)
+                < max_pages
+            ):
                 url = await queue.get_next()
+
                 if url is None:
                     break
 
-                domain = origin_domains.get(url, urlparse(url).netloc)
+                if url in self.visited_urls:
+                    continue
+
+                self.visited_urls.add(url)
+
+                domain = urlparse(url).netloc
                 task = asyncio.create_task(
-                    self.semaphore_manager.acquire_and_run(domain, self.fetch_and_parse, url)
+                    self.semaphore_manager.acquire_and_run(
+                        domain,
+                        self.fetch_and_parse,
+                  url,
+                    )
                 )
                 in_flight[task] = url
 
             if not in_flight:
                 break
 
-            done, _ = await asyncio.wait(in_flight.keys(), return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await asyncio.wait(
+                in_flight,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
 
             for task in done:
                 url = in_flight.pop(task)
-                current_depth = depths.get(url, 0)
-                origin_domain = origin_domains.get(url)
+                current_depth = depths[url]
+                origin_domain = origin_domains[url]
 
-                result = task.result()
+                try:
+                    result = task.result()
+                except Exception as error:
+                    logger.exception("Ошибка обработки %s", url)
+                    self.failed_urls[url] = str(error)
+                    queue.mark_failed(url, str(error))
+                    continue
 
                 if result is None:
+                    self.failed_urls[url] = "request_failed"
                     queue.mark_failed(url, "request_failed")
                     continue
 
                 error = result.get("error")
                 if error:
+                    self.failed_urls[url] = error
                     queue.mark_failed(url, error)
                     continue
 
+                self.processed_urls[url] = result
                 queue.mark_processed(url, result)
 
-                for link in result.get("links", []):
-                    next_depth = current_depth + 1
-                    if next_depth > max_depth:
-                        continue
-                    if same_domain_only and urlparse(link).netloc != origin_domain:
-                        continue
-                    if exclude_patterns and any(p in link for p in exclude_patterns):
-                        continue
-                    if include_patterns and not any(p in link for p in include_patterns):
-                        continue
+                next_depth = current_depth + 1
 
-                    queue.add_url(link, 0)
-                    depths[link] = next_depth
-                    origin_domains[link] = origin_domain
+                if next_depth <= self.max_depth:
+                    for link in result.get("links", []):
+                        if not self._is_allowed_url(
+                            url=link,
+                            origin_domain=origin_domain,
+                            same_domain_only=same_domain_only,
+                            exclude_patterns=exclude_patterns,
+                            include_patterns=include_patterns,
+                        ):
+                            continue
 
-        return queue
+                        if link in self.visited_urls:
+                            continue
+
+                        queue.add_url(link)
+                        depths.setdefault(link, next_depth)
+                        origin_domains.setdefault(link, origin_domain)
+
+                self._print_progress(queue)
+
+        return list(self.processed_urls.values())
 
     async def close(self) -> None:
         if self.session is not None and not self.session.closed:
             await self.session.close()
-            logger.info("HTTP-сессия закрыта")
+
+        logger.info("HTTP-сессия закрыта")

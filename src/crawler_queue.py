@@ -4,17 +4,17 @@ import time
 class CrawlerQueue:
     def __init__(self):
         self.queue = []
-        self.visited_urls = set()
+        self.queued_urls = set()
         self.failed_urls = {}
         self.processed_urls = {}
         self._start_time = time.monotonic()
 
 
     def add_url(self, url: str, priority: int = 0):
-        if url in self.visited_urls:
+        if url in self.queued_urls:
             return
 
-        self.visited_urls.add(url)
+        self.queued_urls.add(url)
         self.queue.append((url, priority))
 
     async def get_next(self) -> str | None:
@@ -40,7 +40,7 @@ class CrawlerQueue:
             'count_queue': len(self.queue),
             'failed_urls': len(self.failed_urls),
             'processed_urls': len(self.processed_urls),
-            'visited_urls': len(self.visited_urls),
+            'queued_urls': len(self.queued_urls),
             'elapsed_sec': round(elapsed, 2),
             'pages_per_sec': round(processed_count / elapsed, 3),
         }

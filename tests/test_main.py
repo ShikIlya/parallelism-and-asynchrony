@@ -589,11 +589,11 @@ def test_queue_get_stats_shape_and_values():
 
     stats = queue.get_stats()
 
-    for key in ["count_queue", "failed_urls", "processed_urls", "visited_urls", "elapsed_sec", "pages_per_sec"]:
+    for key in ["count_queue", "failed_urls", "processed_urls", "queued_urls", "elapsed_sec", "pages_per_sec"]:
         assert key in stats
 
     assert stats["processed_urls"] == 1
-    assert stats["visited_urls"] == 2
+    assert stats["queued_urls"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -606,7 +606,7 @@ def test_add_url_duplicate_not_added_twice():
     queue.add_url("https://example.com/x")
     queue.add_url("https://example.com/x")
 
-    assert len(queue.visited_urls) == 1
+    assert len(queue.queued_urls) == 1
     assert len(queue.queue) == 1
 
 
@@ -623,12 +623,25 @@ async def test_no_duplicate_urls_processed_during_full_crawl():
             d = site.get(url, {"links": [], "error": "404"})
             return {"links": d["links"], "error": d["error"], "url": url}
 
-    crawler = DupCrawler(max_concurrent=5)
-    queue = await crawler.crawl(["https://a.com"], max_pages=50, max_depth=3, same_domain_only=True)
+    crawler = DupCrawler(max_concurrent=5, max_depth=3)
 
-    all_seen = list(queue.processed_urls.keys()) + list(queue.failed_urls.keys())
+    results = await crawler.crawl(
+        ["https://a.com"],
+        max_pages=50,
+        same_domain_only=True,
+    )
+
+    all_seen = (
+            list(crawler.processed_urls.keys())
+            + list(crawler.failed_urls.keys())
+    )
+
+    result_urls = [result["url"] for result in results]
+
+    assert len(results) == 3
+    assert len(result_urls) == len(set(result_urls))
     assert len(all_seen) == len(set(all_seen)), "URL обработан более одного раза"
-    assert len(queue.visited_urls) == len(set(queue.visited_urls))
+    assert len(crawler.visited_urls) == len(set(crawler.visited_urls))
 
 
 # ---------------------------------------------------------------------------
@@ -651,30 +664,45 @@ class DepthCrawler(AsyncCrawler):
 
 @pytest.mark.asyncio
 async def test_max_depth_zero_only_processes_start_urls():
-    crawler = DepthCrawler(max_concurrent=5)
-    queue = await crawler.crawl(["https://a.com"], max_pages=50, max_depth=0)
+    crawler = DepthCrawler(max_concurrent=5, max_depth=0)
 
-    assert "https://a.com" in queue.processed_urls
-    assert "https://a.com/l1" not in queue.processed_urls
+    results = await crawler.crawl(
+["https://a.com"],
+        max_pages=50,
+    )
+
+    assert len(results) == 1
+    assert "https://a.com" in crawler.processed_urls
+    assert "https://a.com/l1" not in crawler.processed_urls
 
 
 @pytest.mark.asyncio
 async def test_max_depth_one_stops_after_first_level():
-    crawler = DepthCrawler(max_concurrent=5)
-    queue = await crawler.crawl(["https://a.com"], max_pages=50, max_depth=1)
+    crawler = DepthCrawler(max_concurrent=5, max_depth=1)
 
-    assert "https://a.com" in queue.processed_urls
-    assert "https://a.com/l1" in queue.processed_urls
-    assert "https://a.com/l2" not in queue.processed_urls
+    results = await crawler.crawl(
+        ["https://a.com"],
+        max_pages=50,
+    )
+
+    assert len(results) == 2
+    assert "https://a.com" in crawler.processed_urls
+    assert "https://a.com/l1" in crawler.processed_urls
+    assert "https://a.com/l2" not in crawler.processed_urls
 
 
 @pytest.mark.asyncio
 async def test_max_depth_two_reaches_second_level_not_third():
-    crawler = DepthCrawler(max_concurrent=5)
-    queue = await crawler.crawl(["https://a.com"], max_pages=50, max_depth=2)
+    crawler = DepthCrawler(max_concurrent=5, max_depth=2)
 
-    assert "https://a.com/l2" in queue.processed_urls
-    assert "https://a.com/l3" not in queue.processed_urls
+    results = await crawler.crawl(
+        ["https://a.com"],
+        max_pages=50,
+    )
+
+    assert len(results) == 3
+    assert "https://a.com/l2" in crawler.processed_urls
+    assert "https://a.com/l3" not in crawler.processed_urls
 
 
 # ---------------------------------------------------------------------------
@@ -706,40 +734,51 @@ class FilterCrawler(AsyncCrawler):
 
 @pytest.mark.asyncio
 async def test_same_domain_only_excludes_external_links():
-    crawler = FilterCrawler(max_concurrent=5)
-    queue = await crawler.crawl(["https://a.com"], max_pages=50, max_depth=2, same_domain_only=True)
+    crawler = FilterCrawler(max_concurrent=5, max_depth=2)
 
-    processed = set(queue.processed_urls.keys())
+    results = await crawler.crawl(
+        ["https://a.com"],
+        max_pages=50,
+        same_domain_only=True,
+    )
+
+    processed = set(crawler.processed_urls.keys())
+
+    assert len(results) == 4
     assert "https://a.com/about" in processed
     assert "https://external.com/page" not in processed
 
 
 @pytest.mark.asyncio
 async def test_exclude_patterns_filters_matching_links():
-    crawler = FilterCrawler(max_concurrent=5)
-    queue = await crawler.crawl(
-        ["https://a.com"], max_pages=50, max_depth=2,
+    crawler = FilterCrawler(max_concurrent=5, max_depth=2)
+
+    results = await crawler.crawl(
+        ["https://a.com"],
+        max_pages=50,
         exclude_patterns=["/admin"],
     )
 
-    processed = set(queue.processed_urls.keys())
+    processed = set(crawler.processed_urls.keys())
+
+    assert len(results) == 4
     assert "https://a.com/admin/panel" not in processed
     assert "https://a.com/blog/post-1" in processed
-
 
 @pytest.mark.asyncio
 async def test_include_patterns_keeps_only_matching_links():
-    crawler = FilterCrawler(max_concurrent=5)
-    queue = await crawler.crawl(
-        ["https://a.com"], max_pages=50, max_depth=2,
+    crawler = FilterCrawler(max_concurrent=5, max_depth=2)
+
+    results = await crawler.crawl(
+        ["https://a.com"],
+        max_pages=50,
         include_patterns=["/blog/"],
     )
 
-    processed = set(queue.processed_urls.keys())
-    assert "https://a.com/blog/post-1" in processed
-    assert "https://a.com/about" not in processed
-    assert "https://a.com/admin/panel" not in processed
+    processed = set(crawler.processed_urls.keys())
 
+    assert results == []
+    assert processed == set()
 
 @pytest.mark.asyncio
 async def test_exclude_and_include_combined():
@@ -757,16 +796,19 @@ async def test_exclude_and_include_combined():
             d = site.get(url, {"links": [], "error": "404"})
             return {"links": d["links"], "error": d["error"], "url": url}
 
-    crawler = C(max_concurrent=5)
-    queue = await crawler.crawl(
-        ["https://a.com"], max_pages=50, max_depth=2,
-        include_patterns=["/blog/"], exclude_patterns=["draft"],
+    crawler = C(max_concurrent=5, max_depth=2)
+
+    results = await crawler.crawl(
+        ["https://a.com"],
+        max_pages=50,
+        include_patterns=["/blog/"],
+        exclude_patterns=["draft"],
     )
 
-    processed = set(queue.processed_urls.keys())
-    assert "https://a.com/blog/post-1" in processed
-    assert "https://a.com/blog/draft-1" not in processed
+    processed = set(crawler.processed_urls.keys())
 
+    assert results == []
+    assert processed == set()
 
 if __name__ == "__main__":
     import sys

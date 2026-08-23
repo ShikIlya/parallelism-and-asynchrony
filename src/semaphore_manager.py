@@ -27,12 +27,14 @@ class SemaphoreManager:
                 self.active_tasks += 1
 
                 try:
-                    result = await coro_func(*args)
+                    return await coro_func(*args)
 
-                    return result
-
-                except Exception as error:
-                    return None
+                except Exception:
+                    logger.exception(
+                        "Ошибка выполнения задачи для домена %s",
+                        domain,
+                    )
+                    raise
 
                 finally:
                     self.active_tasks -= 1

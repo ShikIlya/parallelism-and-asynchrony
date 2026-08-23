@@ -236,18 +236,28 @@ async def demo_day3_crawling():
     print("\n" + "#" * 70)
     print("# ДЕНЬ 3: управление конкурентностью и очередями")
     print("#" * 70)
-    print(f"Количество URL для обработки: {len(DAY3_URLS)}")
 
-    crawler = AsyncCrawler(max_concurrent=10)
+    crawler = AsyncCrawler(
+        max_concurrent=10,
+        max_depth=2,
+    )
 
     try:
-        queue = await crawler.crawl(
+        results = await crawler.crawl(
             start_urls=DAY3_URLS,
             max_pages=50,
             same_domain_only=True,
         )
-        stats = queue.get_stats()
-        print(f"Обработано: {stats['processed_urls']}, ошибок: {stats['failed_urls']}, скорость: {stats['pages_per_sec']} стр/сек")
+
+        print(f"Обработано: {len(results)} страниц")
+        print(f"Посещено URL: {len(crawler.visited_urls)}")
+        print(f"Ошибок: {len(crawler.failed_urls)}")
+
+        if crawler.failed_urls:
+            print("Неудачные URL:")
+            for url, error in crawler.failed_urls.items():
+                print(f" - {url}: {error}")
+
     finally:
         await crawler.close()
 
