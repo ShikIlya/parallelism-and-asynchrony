@@ -1,8 +1,10 @@
 from crawler import AsyncCrawler
 
 import time
+import json
 import asyncio
 import logging
+from pathlib import Path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -232,6 +234,27 @@ async def demo_day2_parsing() -> None:
 
 DAY3_URLS = ["https://example.com"]
 
+def save_crawl_results(
+    results: list[dict],
+    failed_urls: dict[str, str],
+    filename: str = "day3_crawl_results.json",
+) -> Path:
+    data = {
+        "processed_pages": len(results),
+        "failed_pages": len(failed_urls),
+        "results": results,
+        "failed_urls": failed_urls,
+    }
+
+    output_path = Path(filename)
+
+    output_path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    return output_path
+
 async def demo_day3_crawling():
     print("\n" + "#" * 70)
     print("# ДЕНЬ 3: управление конкурентностью и очередями")
@@ -249,6 +272,12 @@ async def demo_day3_crawling():
             same_domain_only=True,
         )
 
+        output_path = save_crawl_results(
+            results=results,
+            failed_urls=crawler.failed_urls,
+        )
+
+        print(f"Данные сохранены: {output_path.resolve()}")
         print(f"Обработано: {len(results)} страниц")
         print(f"Посещено URL: {len(crawler.visited_urls)}")
         print(f"Ошибок: {len(crawler.failed_urls)}")

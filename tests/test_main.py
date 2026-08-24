@@ -777,8 +777,11 @@ async def test_include_patterns_keeps_only_matching_links():
 
     processed = set(crawler.processed_urls.keys())
 
-    assert results == []
-    assert processed == set()
+    assert len(results) == 2
+    assert processed == {
+        "https://a.com",
+        "https://a.com/blog/post-1",
+    }
 
 @pytest.mark.asyncio
 async def test_exclude_and_include_combined():
@@ -807,8 +810,11 @@ async def test_exclude_and_include_combined():
 
     processed = set(crawler.processed_urls.keys())
 
-    assert results == []
-    assert processed == set()
+    assert len(results) == 2
+    assert processed == {
+        "https://a.com",
+        "https://a.com/blog/post-1",
+    }
 
 if __name__ == "__main__":
     import sys

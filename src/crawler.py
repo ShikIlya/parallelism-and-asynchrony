@@ -181,18 +181,15 @@ class AsyncCrawler:
         origin_domains: dict[str, str] = {}
 
         for url in start_urls:
-            if not self._is_allowed_url(
-                url=url,
-                origin_domain=urlparse(url).netloc,
-                same_domain_only=False,
-                exclude_patterns=exclude_patterns,
-                include_patterns=include_patterns,
-            ):
+            parsed = urlparse(url)
+
+            if parsed.scheme not in {"http", "https"}:
+                logger.warning("Пропущен некорректный стартовый URL: %s", url)
                 continue
 
             queue.add_url(url)
             depths[url] = 0
-            origin_domains[url] = urlparse(url).netloc
+            origin_domains[url] = parsed.netloc
 
         in_flight: dict[asyncio.Task, str] = {}
 
@@ -277,9 +274,12 @@ class AsyncCrawler:
                         if link in self.visited_urls:
                             continue
 
-                        queue.add_url(link)
-                        depths.setdefault(link, next_depth)
-                        origin_domains.setdefault(link, origin_domain)
+                        old_depth = depths.get(link)
+
+                        if old_depth is None or next_depth < old_depth:
+                            depths[link] = next_depth
+                            origin_domains.setdefault(link, origin_domain)
+                            queue.add_url(link)
 
                 self._print_progress(queue)
 
