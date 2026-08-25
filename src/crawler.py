@@ -1,7 +1,7 @@
 import asyncio
 import aiohttp
 import logging
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urldefrag
 
 from html_parser import HTMLParser
 from crawler_queue import CrawlerQueue
@@ -37,6 +37,11 @@ class AsyncCrawler:
         self.failed_urls: dict[str, str] = {}
         self.processed_urls: dict[str, dict] = {}
 
+    @staticmethod
+    def _normalize_url(url: str) -> str:
+        normalized_url, _ = urldefrag(url)
+        return normalized_url
+
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
             timeout = aiohttp.ClientTimeout(
@@ -47,7 +52,7 @@ class AsyncCrawler:
 
             connector = aiohttp.TCPConnector(
                 limit=self.max_concurrent,
-                limit_per_host=self.max_concurrent,
+                limit_per_host=self.semaphore_manager.max_per_domain,
             )
 
             self.session = aiohttp.ClientSession(
@@ -96,11 +101,44 @@ class AsyncCrawler:
             )
             return ""
 
-    async def fetch_urls(self, urls: list[str]) -> dict[str, str]:
-        tasks = [self.fetch_url(url) for url in urls]
-        contents = await asyncio.gather(*tasks)
+    async def _fetch_with_limits(self, url: str) -> tuple[str, str]:
+        domain = urlparse(url).netloc
 
-        return dict(zip(urls, contents))
+        content = await self.semaphore_manager.acquire_and_run(
+            domain,
+            self.fetch_url,
+            url,
+        )
+
+        return url, content
+
+    async def fetch_urls(self, urls: list[str]) -> dict[str, str]:
+        tasks = [
+            self._fetch_with_limits(url)
+            for url in urls
+        ]
+
+        results = await asyncio.gather(
+            *tasks,
+            return_exceptions=True,
+        )
+
+        fetched: dict[str, str] = {}
+
+        for url, result in zip(urls, results):
+            if isinstance(result, Exception):
+                logger.warning(
+                    "Не удалось загрузить %s: %s",
+                    url,
+                    result,
+                )
+                fetched[url] = ""
+                continue
+
+            fetched_url, content = result
+            fetched[fetched_url] = content
+
+        return fetched
 
     async def fetch_and_parse(self, url: str) -> dict:
         html = await self.fetch_url(url)
@@ -180,7 +218,8 @@ class AsyncCrawler:
         depths: dict[str, int] = {}
         origin_domains: dict[str, str] = {}
 
-        for url in start_urls:
+        for raw_url in start_urls:
+            url = self._normalize_url(raw_url)
             parsed = urlparse(url)
 
             if parsed.scheme not in {"http", "https"}:
@@ -250,10 +289,10 @@ class AsyncCrawler:
                     continue
 
                 error = result.get("error")
+
                 if error:
                     self.failed_urls[url] = error
                     queue.mark_failed(url, error)
-                    continue
 
                 self.processed_urls[url] = result
                 queue.mark_processed(url, result)
@@ -261,7 +300,9 @@ class AsyncCrawler:
                 next_depth = current_depth + 1
 
                 if next_depth <= self.max_depth:
-                    for link in result.get("links", []):
+                    for raw_link in result.get("links", []):
+                        link = self._normalize_url(raw_link)
+
                         if not self._is_allowed_url(
                             url=link,
                             origin_domain=origin_domain,
