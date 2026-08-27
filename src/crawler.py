@@ -6,6 +6,7 @@ from urllib.parse import urlparse, urlunparse
 from html_parser import HTMLParser
 from crawler_queue import CrawlerQueue
 from semaphore_manager import SemaphoreManager
+from rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +17,8 @@ class AsyncCrawler:
         max_concurrent: int = 10,
         max_depth: int = 2,
         max_per_domain: int = 3,
+        requests_per_second: float = 1.0,
+        rate_limit_per_domain: bool = True,
     ):
         if max_concurrent <= 0:
             raise ValueError("max_concurrent must be positive")
@@ -31,6 +34,10 @@ class AsyncCrawler:
         self.semaphore_manager = SemaphoreManager(
             max_concurrent=max_concurrent,
             max_per_domain=max_per_domain,
+        )
+        self.rate_limiter = RateLimiter(
+            requests_per_second=requests_per_second,
+            per_domain=rate_limit_per_domain,
         )
 
         self.visited_urls: set[str] = set()
@@ -78,6 +85,9 @@ class AsyncCrawler:
 
         try:
             session = await self._get_session()
+
+            domain = urlparse(url).netloc
+            await self.rate_limiter.acquire(domain)
 
             async with session.get(url) as response:
                 response.raise_for_status()
