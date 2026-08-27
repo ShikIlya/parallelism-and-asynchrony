@@ -1,7 +1,7 @@
 import asyncio
 import aiohttp
 import logging
-from urllib.parse import urlparse, urldefrag
+from urllib.parse import urlparse, urlunparse
 
 from html_parser import HTMLParser
 from crawler_queue import CrawlerQueue
@@ -39,8 +39,18 @@ class AsyncCrawler:
 
     @staticmethod
     def _normalize_url(url: str) -> str:
-        normalized_url, _ = urldefrag(url)
-        return normalized_url
+        parsed = urlparse(url)
+
+        return urlunparse(
+            (
+                parsed.scheme,
+                parsed.netloc,
+                parsed.path,
+                parsed.params,
+                "",
+                "",
+            )
+        )
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
@@ -293,36 +303,36 @@ class AsyncCrawler:
                 if error:
                     self.failed_urls[url] = error
                     queue.mark_failed(url, error)
+                else:
+                    self.processed_urls[url] = result
+                    queue.mark_processed(url, result)
 
-                self.processed_urls[url] = result
-                queue.mark_processed(url, result)
+                    next_depth = current_depth + 1
 
-                next_depth = current_depth + 1
+                    if next_depth <= self.max_depth:
+                        for raw_link in result.get("links", []):
+                            link = self._normalize_url(raw_link)
 
-                if next_depth <= self.max_depth:
-                    for raw_link in result.get("links", []):
-                        link = self._normalize_url(raw_link)
+                            if not self._is_allowed_url(
+                                url=link,
+                                origin_domain=origin_domain,
+                                same_domain_only=same_domain_only,
+                                exclude_patterns=exclude_patterns,
+                                include_patterns=include_patterns,
+                            ):
+                                continue
 
-                        if not self._is_allowed_url(
-                            url=link,
-                            origin_domain=origin_domain,
-                            same_domain_only=same_domain_only,
-                            exclude_patterns=exclude_patterns,
-                            include_patterns=include_patterns,
-                        ):
-                            continue
+                            if link in self.visited_urls:
+                                continue
 
-                        if link in self.visited_urls:
-                            continue
+                            old_depth = depths.get(link)
 
-                        old_depth = depths.get(link)
+                            if old_depth is None or next_depth < old_depth:
+                                depths[link] = next_depth
+                                origin_domains.setdefault(link, origin_domain)
+                                queue.add_url(link)
 
-                        if old_depth is None or next_depth < old_depth:
-                            depths[link] = next_depth
-                            origin_domains.setdefault(link, origin_domain)
-                            queue.add_url(link)
-
-                self._print_progress(queue)
+                    self._print_progress(queue)
 
         return list(self.processed_urls.values())
 

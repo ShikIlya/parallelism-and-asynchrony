@@ -816,6 +816,18 @@ async def test_exclude_and_include_combined():
         "https://a.com/blog/post-1",
     }
 
+def test_normalize_url_removes_query_and_fragment():
+    first = AsyncCrawler._normalize_url(
+        "https://site/page?utm=1#section"
+    )
+    second = AsyncCrawler._normalize_url(
+        "https://site/page?utm=2"
+    )
+
+    assert first == "https://site/page"
+    assert second == "https://site/page"
+    assert first == second
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))
