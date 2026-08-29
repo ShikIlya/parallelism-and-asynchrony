@@ -1,7 +1,6 @@
 import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock
-
+from unittest.mock import patch, AsyncMock, MagicMock
 import aiohttp
 import pytest
 from bs4 import BeautifulSoup
@@ -10,6 +9,19 @@ from crawler import AsyncCrawler
 from main import load_sequentially
 from html_parser import HTMLParser
 from crawler_queue import CrawlerQueue
+from rate_limiter import RateLimiter
+from robots_parser import RobotsParser
+
+@pytest.fixture
+def mock_session():
+    session = AsyncMock()
+    response = AsyncMock()
+    response.status = 200
+    response.text = AsyncMock(return_value="")
+    response.raise_for_status = MagicMock()
+    session.get.return_value.__aenter__.return_value = response
+    session.get.return_value.__aexit__ = AsyncMock()
+    return session
 
 # --------------------------------------------------------------------------
 # День 1: последовательная vs параллельная загрузка
@@ -827,6 +839,315 @@ def test_normalize_url_removes_query_and_fragment():
     assert first == "https://site/page"
     assert second == "https://site/page"
     assert first == second
+
+# --------------------------------------------------------------------------
+# День 4: мониторинг скорости и прогресса
+# --------------------------------------------------------------------------
+
+# =============================================================================
+# Тесты для RateLimiter
+# =============================================================================
+
+class TestRateLimiter:
+    @pytest.mark.asyncio
+    async def test_per_domain_limits(self):
+        limiter = RateLimiter(requests_per_second=2.0, per_domain=True)
+        domain = "example.com"
+
+        start = time.perf_counter()
+        await limiter.acquire(domain)
+        await limiter.acquire(domain)
+        elapsed = time.perf_counter() - start
+
+        assert elapsed >= 0.4
+
+    @pytest.mark.asyncio
+    async def test_different_domains_independent(self):
+        limiter = RateLimiter(requests_per_second=1.0, per_domain=True)
+
+        start = time.perf_counter()
+        await asyncio.gather(
+            limiter.acquire("a.com"),
+            limiter.acquire("b.com"),
+        )
+        elapsed = time.perf_counter() - start
+
+        assert elapsed < 0.2
+
+    @pytest.mark.asyncio
+    async def test_global_limit(self):
+        limiter = RateLimiter(requests_per_second=1.0, per_domain=False)
+
+        start = time.perf_counter()
+        await asyncio.gather(
+            limiter.acquire("a.com"),
+            limiter.acquire("b.com"),
+        )
+        elapsed = time.perf_counter() - start
+
+        assert elapsed >= 0.9
+
+    @pytest.mark.asyncio
+    async def test_acquire_updates_timestamps(self):
+        limiter = RateLimiter(requests_per_second=1.0, per_domain=True)
+        domain = "test.com"
+
+        await limiter.acquire(domain)
+        first_time = limiter.requests_time[domain]
+
+        await asyncio.sleep(0.1)
+        await limiter.acquire(domain)
+        second_time = limiter.requests_time[domain]
+
+        assert second_time > first_time
+
+class TestRobotsParser:
+    @pytest.mark.asyncio
+    async def test_parse_robots_valid(self):
+        robots_text = """
+        User-agent: *
+        Disallow: /admin
+        Disallow: /private
+        Crawl-delay: 5
+
+        User-agent: MyBot
+        Disallow: /temp
+        Crawl-delay: 2
+        """
+        with patch('aiohttp.ClientSession.get') as mock_get:
+            mock_response = AsyncMock()
+            mock_response.status = 200
+            mock_response.text = AsyncMock(return_value=robots_text)
+
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__ = AsyncMock(return_value=mock_response)
+            mock_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_get.return_value = mock_cm
+
+            session = aiohttp.ClientSession()
+            parser = RobotsParser(session)
+            await parser.fetch_robots("https://example.com")
+
+            assert parser.can_fetch("https://example.com/index.html", "*") is True
+            assert parser.can_fetch("https://example.com/admin/page", "*") is False
+            assert parser.can_fetch("https://example.com/private/data", "*") is False
+            assert parser.can_fetch("https://example.com/temp/file", "MyBot") is False
+            assert parser.can_fetch("https://example.com/index.html", "MyBot") is True
+
+            assert parser.get_crawl_delay("*") == 5.0
+            assert parser.get_crawl_delay("MyBot") == 2.0
+            assert parser.get_crawl_delay("OtherBot") == 5.0
+
+            await session.close()
+
+    @pytest.mark.asyncio
+    async def test_robots_no_disallow(self):
+        robots_text = "User-agent: *\nCrawl-delay: 1"
+        with patch('aiohttp.ClientSession.get') as mock_get:
+            mock_response = AsyncMock()
+            mock_response.status = 200
+            mock_response.text = AsyncMock(return_value=robots_text)
+
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__ = AsyncMock(return_value=mock_response)
+            mock_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_get.return_value = mock_cm
+
+            session = aiohttp.ClientSession()
+            parser = RobotsParser(session)
+            await parser.fetch_robots("https://example.com")
+
+            assert parser.can_fetch("https://example.com/any", "*") is True
+            assert parser.get_crawl_delay("*") == 1.0
+
+            await session.close()
+
+    @pytest.mark.asyncio
+    async def test_robots_404(self):
+        with patch('aiohttp.ClientSession.get') as mock_get:
+            mock_response = AsyncMock()
+            mock_response.status = 404
+            mock_response.text = AsyncMock(return_value="")
+
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__ = AsyncMock(return_value=mock_response)
+            mock_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_get.return_value = mock_cm
+
+            session = aiohttp.ClientSession()
+            parser = RobotsParser(session)
+            await parser.fetch_robots("https://example.com")
+
+            assert parser.can_fetch("https://example.com/any", "*") is True
+            assert parser.get_crawl_delay("*") == 0.0
+
+            await session.close()
+
+    @pytest.mark.asyncio
+    async def test_robots_cache(self):
+        with patch('aiohttp.ClientSession.get') as mock_get:
+            mock_response = AsyncMock()
+            mock_response.status = 200
+            mock_response.text = AsyncMock(return_value="User-agent: *\nDisallow: /secret")
+
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__ = AsyncMock(return_value=mock_response)
+            mock_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_get.return_value = mock_cm
+
+            session = aiohttp.ClientSession()
+            parser = RobotsParser(session)
+            await parser.fetch_robots("https://example.com")
+            await parser.fetch_robots("https://example.com")
+
+            assert mock_get.call_count == 1
+            await session.close()
+
+# =============================================================================
+# Интеграционные тесты для AsyncCrawler (rate limiting + robots)
+# =============================================================================
+
+class TestCrawlerRateLimiting:
+    @pytest.mark.asyncio
+    async def test_crawler_respects_robots_disallow(self, mock_session):
+        crawler = AsyncCrawler(respect_robots=True)
+        crawler.session = mock_session
+
+        async def mock_check_robots(self, url, domain, base_url):
+            self.blocked_urls[url] = "robots.txt disallow"
+            return -1.0
+
+        crawler._check_robots = mock_check_robots.__get__(crawler)
+        crawler.rate_limiter = RateLimiter(requests_per_second=1000)
+
+        result = await crawler.fetch_url("https://example.com/any")
+        assert result == ""
+        assert "https://example.com/any" in crawler.blocked_urls
+        assert crawler.blocked_urls["https://example.com/any"] == "robots.txt disallow"
+
+        await crawler.close()
+
+    @pytest.mark.asyncio
+    async def test_crawler_applies_crawl_delay(self, mock_session):
+        crawler = AsyncCrawler(respect_robots=True, min_delay=0.0)
+        crawler.session = mock_session
+
+        mock_parser = AsyncMock()
+        mock_parser.can_fetch.return_value = True
+        mock_parser.get_crawl_delay.return_value = 1.0
+        crawler.robots_parser = mock_parser
+
+        response = AsyncMock()
+        response.status = 200
+        response.text = AsyncMock(return_value="<html>ok</html>")
+        response.raise_for_status = MagicMock()
+        mock_session.get.return_value.__aenter__.return_value = response
+
+        start = time.perf_counter()
+        await crawler.fetch_url("https://example.com/page")
+        elapsed = time.perf_counter() - start
+
+        assert elapsed >= 0.9, "Crawl-delay не применён"
+        await crawler.close()
+
+    @pytest.mark.asyncio
+    async def test_crawler_uses_min_delay(self, mock_session):
+        crawler = AsyncCrawler(min_delay=0.5, jitter=0.0, respect_robots=False)
+        crawler.session = mock_session
+        crawler.rate_limiter = RateLimiter(requests_per_second=100)
+
+        response = AsyncMock()
+        response.status = 200
+        response.text = AsyncMock(return_value="ok")
+        response.raise_for_status = MagicMock()
+        mock_session.get.return_value.__aenter__.return_value = response
+
+        start = time.perf_counter()
+        await crawler.fetch_url("https://example.com/1")
+        await crawler.fetch_url("https://example.com/2")
+        elapsed = time.perf_counter() - start
+
+        assert elapsed >= 0.4, "min_delay не соблюдается"
+        await crawler.close()
+
+    @pytest.mark.asyncio
+    async def test_crawler_uses_jitter(self, mock_session):
+        crawler = AsyncCrawler(min_delay=0.1, jitter=0.3, respect_robots=False)
+        crawler.session = mock_session
+        crawler.rate_limiter = RateLimiter(requests_per_second=100)
+
+        response = AsyncMock()
+        response.status = 200
+        response.text = AsyncMock(return_value="ok")
+        response.raise_for_status = MagicMock()
+        mock_session.get.return_value.__aenter__.return_value = response
+
+        delays = []
+        for _ in range(5):
+            start = time.perf_counter()
+            await crawler.fetch_url("https://example.com/test")
+            elapsed = time.perf_counter() - start
+            delays.append(elapsed)
+
+        assert any(d > 0.15 for d in delays), "Jitter не добавил вариативности"
+        await crawler.close()
+
+class TestCrawlerMonitoring:
+    @pytest.mark.asyncio
+    async def test_get_current_rps(self):
+        crawler = AsyncCrawler()
+        crawler._record_request()
+        await asyncio.sleep(0.01)
+        crawler._record_request()
+        crawler._record_request()
+
+        rps = crawler.get_current_rps()
+
+        assert rps == 3.0 / 60.0
+
+    @pytest.mark.asyncio
+    async def test_get_average_delay(self):
+        crawler = AsyncCrawler()
+        now = time.time()
+        crawler._request_timestamps = [now, now + 0.5, now + 1.0]
+        avg = crawler.get_average_delay()
+
+        assert avg == 0.5
+
+    @pytest.mark.asyncio
+    async def test_record_request_keeps_last_60_seconds(self):
+        crawler = AsyncCrawler()
+        now = time.time()
+        old = [now - 70, now - 65]
+        new = [now - 10, now - 5, now]
+        crawler._request_timestamps = old + new
+        crawler._record_request()
+
+        for ts in crawler._request_timestamps:
+            assert ts > now - 60
+
+        assert len(crawler._request_timestamps) == 4
+
+class TestRateLimiterIntegration:
+    @pytest.mark.asyncio
+    async def test_rate_limiter_called_before_request(self, mock_session):
+        crawler = AsyncCrawler(max_concurrent=1, requests_per_second=1.0)
+        mock_limiter = AsyncMock()
+        mock_limiter.acquire = AsyncMock()
+        mock_limiter.min_interval = 0.1
+        crawler.rate_limiter = mock_limiter
+
+        crawler.session = mock_session
+        response = AsyncMock()
+        response.status = 200
+        response.text = AsyncMock(return_value="ok")
+        response.raise_for_status = MagicMock()
+        mock_session.get.return_value.__aenter__.return_value = response
+
+        crawler.robots_parser = None
+        await crawler.fetch_url("https://example.com")
+        mock_limiter.acquire.assert_called_once_with("example.com")
+        await crawler.close()
 
 if __name__ == "__main__":
     import sys

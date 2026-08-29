@@ -2,11 +2,14 @@ import asyncio
 import aiohttp
 import logging
 from urllib.parse import urlparse, urlunparse
+import random
+import time
 
 from html_parser import HTMLParser
 from crawler_queue import CrawlerQueue
 from semaphore_manager import SemaphoreManager
 from rate_limiter import RateLimiter
+from robots_parser import RobotsParser
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +22,13 @@ class AsyncCrawler:
         max_per_domain: int = 3,
         requests_per_second: float = 1.0,
         rate_limit_per_domain: bool = True,
+        respect_robots: bool = False,
+        user_agent: str = "AsyncCrawler/1.0",
+        min_delay: float = 0.0,
+        jitter: float = 0.0,
+        backoff_base: float = 0,
+        backoff_max: float = 0,
+        backoff_max_retries: int = 0,
     ):
         if max_concurrent <= 0:
             raise ValueError("max_concurrent must be positive")
@@ -28,6 +38,13 @@ class AsyncCrawler:
 
         self.max_concurrent = max_concurrent
         self.max_depth = max_depth
+        self.respect_robots = respect_robots
+        self.user_agent = user_agent
+        self.min_delay = min_delay
+        self.jitter = jitter
+        self.backoff_base = backoff_base
+        self.backoff_max = backoff_max
+        self.backoff_max_retries = backoff_max_retries
 
         self.session: aiohttp.ClientSession | None = None
         self.parser = HTMLParser()
@@ -39,25 +56,16 @@ class AsyncCrawler:
             requests_per_second=requests_per_second,
             per_domain=rate_limit_per_domain,
         )
+        self.robots_parser: RobotsParser | None = None
 
+        self.blocked_urls: dict[str, str] = {}
         self.visited_urls: set[str] = set()
         self.failed_urls: dict[str, str] = {}
         self.processed_urls: dict[str, dict] = {}
-
-    @staticmethod
-    def _normalize_url(url: str) -> str:
-        parsed = urlparse(url)
-
-        return urlunparse(
-            (
-                parsed.scheme,
-                parsed.netloc,
-                parsed.path,
-                parsed.params,
-                "",
-                "",
-            )
-        )
+        self.error_counts: dict[str, int] = {}
+        self._request_timestamps: list[float] = []
+        self._start_time: float = 0.0
+        self._total_requests: int = 0
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
@@ -75,62 +83,94 @@ class AsyncCrawler:
             self.session = aiohttp.ClientSession(
                 timeout=timeout,
                 connector=connector,
-                headers={"User-Agent": "AsyncCrawler/1.0"},
+                headers={"User-Agent": self.user_agent},
             )
+
+            self.robots_parser = RobotsParser(self.session)
 
         return self.session
 
     async def fetch_url(self, url: str) -> str:
         logger.info("Начало загрузки: %s", url)
 
-        try:
-            session = await self._get_session()
+        parsed = urlparse(url)
+        base_url = f"{parsed.scheme}://{parsed.netloc}"
+        domain = parsed.netloc
 
-            domain = urlparse(url).netloc
-            await self.rate_limiter.acquire(domain)
+        retries = 0
 
-            async with session.get(url) as response:
-                response.raise_for_status()
-                content = await response.text()
+        while retries <= self.backoff_max_retries:
+            try:
+                session = await self._get_session()
 
-                logger.info(
-                    "Успешно загружено: %s, статус: %s",
+                crawl_delay = await self._check_robots(url, domain, base_url)
+
+                if crawl_delay < 0:
+                    return ""
+
+                await self.rate_limiter.acquire(domain)
+                await self._wait_with_delay(crawl_delay)
+
+                async with session.get(url) as response:
+                    response.raise_for_status()
+                    content = await response.text()
+
+                    logger.info(
+                        "Успешно загружено: %s, статус: %s",
+                        url,
+                        response.status,
+                    )
+
+                    self._reset_error_count(domain)
+
+                    return content
+
+            except aiohttp.ClientResponseError as error:
+                if 400 <= error.status < 500:
+                    logger.warning(
+                        "HTTP-ошибка для %s: %s %s (без повтора)",
+                        url,
+                        error.status,
+                        error.message,
+                    )
+                    return ""
+
+                logger.warning(
+                    "HTTP-ошибка для %s: %s %s (попытка %d)",
                     url,
-                    response.status,
+                    error.status,
+                    error.message,
+                    retries + 1,
                 )
-                return content
 
-        except aiohttp.ClientResponseError as error:
-            logger.warning(
-                "HTTP-ошибка для %s: %s %s",
-                url,
-                error.status,
-                error.message,
-            )
-            return ""
+                await self._wait_with_backoff(domain)
+                retries += 1
 
-        except asyncio.TimeoutError:
-            logger.warning("Таймаут при загрузке: %s", url)
-            return ""
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Таймаут при загрузке: %s (попытка %d)",
+                    url,
+                    retries + 1,
+                )
 
-        except aiohttp.ClientError as error:
-            logger.warning(
-                "Сетевая ошибка для %s: %s",
-                url,
-                type(error).__name__,
-            )
-            return ""
+                await self._wait_with_backoff(domain)
+                retries += 1
 
-    async def _fetch_with_limits(self, url: str) -> tuple[str, str]:
-        domain = urlparse(url).netloc
+            except aiohttp.ClientError as error:
+                logger.warning(
+                    "Сетевая ошибка для %s: %s (попытка %d)",
+                    url,
+                    type(error).__name__,
+                    retries + 1,
+                )
 
-        content = await self.semaphore_manager.acquire_and_run(
-            domain,
-            self.fetch_url,
-            url,
-        )
+                await self._wait_with_backoff(domain)
+                retries += 1
 
-        return url, content
+        logger.error("Превышено количество попыток для %s", url)
+        self.failed_urls[url] = "max_retries_exceeded"
+
+        return ""
 
     async def fetch_urls(self, urls: list[str]) -> dict[str, str]:
         tasks = [
@@ -179,48 +219,6 @@ class AsyncCrawler:
 
         return await self.parser.parse_html(html, url)
 
-    def _reset_crawl_state(self) -> None:
-        self.visited_urls.clear()
-        self.failed_urls.clear()
-        self.processed_urls.clear()
-
-    def _is_allowed_url(
-        self,
-        url: str,
-        origin_domain: str,
-        same_domain_only: bool,
-        exclude_patterns: list[str] | None,
-        include_patterns: list[str] | None,
-    ) -> bool:
-        parsed = urlparse(url)
-
-        if parsed.scheme not in {"http", "https"}:
-            return False
-
-        if same_domain_only and parsed.netloc != origin_domain:
-            return False
-
-        if exclude_patterns and any(pattern in url for pattern in exclude_patterns):
-            return False
-
-        if include_patterns and not any(pattern in url for pattern in include_patterns):
-            return False
-
-        return True
-
-    def _print_progress(self, queue: CrawlerQueue) -> None:
-        stats = queue.get_stats()
-        done = len(self.processed_urls)
-
-        print(
-            f"\r📄 Обработано: {done} | "
-            f"⏳ В очереди: {stats['count_queue']} | "
-            f"❌ Ошибок: {len(self.failed_urls)} | "
-            f"⚡ Скорость: {stats['pages_per_sec']:.2f} стр/сек",
-            end="",
-            flush=True,
-        )
-
     async def crawl(
         self,
         start_urls: list[str],
@@ -233,6 +231,7 @@ class AsyncCrawler:
             return []
 
         self._reset_crawl_state()
+        self._start_time = time.time()
 
         queue = CrawlerQueue()
         depths: dict[str, int] = {}
@@ -351,3 +350,186 @@ class AsyncCrawler:
             await self.session.close()
 
         logger.info("HTTP-сессия закрыта")
+
+
+    @staticmethod
+    def _normalize_url(url: str) -> str:
+        parsed = urlparse(url)
+
+        return urlunparse(
+            (
+                parsed.scheme,
+                parsed.netloc,
+                parsed.path,
+                parsed.params,
+                "",
+                "",
+            )
+        )
+
+    def _calculate_delay(self, crawl_delay: float) -> float:
+        base_delay = self.rate_limiter.min_interval
+
+        if crawl_delay > 0:
+            base_delay = max(base_delay, crawl_delay)
+
+        if self.min_delay > 0:
+            base_delay = max(base_delay, self.min_delay)
+
+        if self.jitter > 0:
+            jitter_value = random.uniform(0, self.jitter)
+            base_delay += jitter_value
+
+        return base_delay
+
+    async def _wait_with_delay(self, crawl_delay: float) -> None:
+        delay = self._calculate_delay(crawl_delay)
+
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+    async def _check_robots(self, url: str, domain: str, base_url: str) -> float:
+        if not self.respect_robots or self.robots_parser is None:
+            return 0.0
+
+        await self.rate_limiter.acquire(domain)
+        await self.robots_parser.fetch_robots(base_url)
+
+        if not self.robots_parser.can_fetch(url, self.user_agent):
+            logger.warning("URL запрещён robots.txt: %s", url)
+            self.blocked_urls[url] = "robots.txt disallow"
+
+            return -1.0
+
+        return self.robots_parser.get_crawl_delay(self.user_agent)
+
+    def _reset_error_count(self, domain: str) -> None:
+        self.error_counts[domain] = 0
+
+    def _apply_backoff(self, domain: str) -> float:
+        self.error_counts[domain] = self.error_counts.get(domain, 0) + 1
+
+        if self.error_counts[domain] > self.backoff_max_retries:
+            return 0.0
+
+        backoff_delay = min(
+            self.backoff_base * (2 ** self.error_counts[domain]),
+            self.backoff_max,
+        )
+
+        logger.info(
+            "Backoff для %s: %.2f сек (попытка %d)",
+            domain,
+            backoff_delay,
+            self.error_counts[domain],
+        )
+
+        return backoff_delay
+
+    async def _wait_with_backoff(self, domain: str) -> None:
+        backoff_delay = self._apply_backoff(domain)
+
+        if backoff_delay > 0:
+            await asyncio.sleep(backoff_delay)
+
+    async def _fetch_with_limits(self, url: str) -> tuple[str, str]:
+        domain = urlparse(url).netloc
+
+        content = await self.semaphore_manager.acquire_and_run(
+            domain,
+            self.fetch_url,
+            url,
+        )
+
+        return url, content
+
+    def _reset_crawl_state(self) -> None:
+        self.visited_urls.clear()
+        self.failed_urls.clear()
+        self.processed_urls.clear()
+        self.blocked_urls.clear()
+        self.error_counts.clear()
+
+        self._request_timestamps = []
+        self._total_requests = 0
+        self._start_time = 0.0
+
+    def _is_allowed_url(
+        self,
+        url: str,
+        origin_domain: str,
+        same_domain_only: bool,
+        exclude_patterns: list[str] | None,
+        include_patterns: list[str] | None,
+    ) -> bool:
+        parsed = urlparse(url)
+
+        if parsed.scheme not in {"http", "https"}:
+            return False
+
+        if same_domain_only and parsed.netloc != origin_domain:
+            return False
+
+        if exclude_patterns and any(pattern in url for pattern in exclude_patterns):
+            return False
+
+        if include_patterns and not any(pattern in url for pattern in include_patterns):
+            return False
+
+        return True
+
+    def _record_request(self) -> None:
+        current_time = time.time()
+        self._request_timestamps.append(current_time)
+        self._total_requests += 1
+
+        cutoff = current_time - 60.0
+        self._request_timestamps = [
+            ts for ts in self._request_timestamps
+            if ts > cutoff
+        ]
+
+    def get_current_rps(self) -> float:
+        if not self._request_timestamps:
+            return 0.0
+
+        return len(self._request_timestamps) / 60.0
+
+    def get_average_delay(self) -> float:
+        if len(self._request_timestamps) < 2:
+            return 0.0
+
+        total_delay = 0.0
+
+        for i in range(1, len(self._request_timestamps)):
+            total_delay += self._request_timestamps[i] - self._request_timestamps[i - 1]
+
+        return total_delay / (len(self._request_timestamps) - 1)
+
+    def get_elapsed_time(self) -> float:
+        if self._start_time == 0.0:
+            return 0.0
+
+        return time.time() - self._start_time
+
+    def _print_progress(self, queue: CrawlerQueue) -> None:
+        stats = queue.get_stats()
+        done = len(self.processed_urls)
+
+        self._record_request()
+
+        current_rps = self.get_current_rps()
+        avg_delay = self.get_average_delay()
+        elapsed = self.get_elapsed_time()
+
+        print(
+            f"\r📄 Обработано: {done} | "
+            f"⏳ В очереди: {stats['count_queue']} | "
+            f"❌ Ошибок: {len(self.failed_urls)} | "
+            f"🚫 Robots: {len(self.blocked_urls)} | "
+            f"⚡ RPS: {current_rps:.2f} | "
+            f"⏱ Задержка: {avg_delay:.2f}с | "
+            f"⏰ Время: {elapsed:.1f}с",
+            end="",
+            flush=True,
+        )

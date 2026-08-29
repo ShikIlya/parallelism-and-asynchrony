@@ -290,10 +290,83 @@ async def demo_day3_crawling():
     finally:
         await crawler.close()
 
+
+# --------------------------------------------------------------------------
+# День 4: мониторинг скорости и прогресса
+# --------------------------------------------------------------------------
+
+DAY4_URLS = [
+    "https://example.com",
+    "https://httpbingo.org/html",
+]
+
+async def demo_day4_monitoring() -> None:
+    print("\n" + "#" * 70)
+    print("# ДЕНЬ 4: Мониторинг скорости и прогресса")
+    print("#" * 70)
+
+    crawler = AsyncCrawler(
+        max_concurrent=3,
+        max_depth=1,
+        max_per_domain=2,
+        requests_per_second=2.0,
+        rate_limit_per_domain=True,
+        respect_robots=False,
+        user_agent="Day4Demo/1.0",
+        min_delay=0.3,
+        jitter=0.2,
+        backoff_base=1.0,
+        backoff_max=10.0,
+        backoff_max_retries=3,
+    )
+
+    print(f"Конфигурация:")
+    print(f"  - max_concurrent: {crawler.max_concurrent}")
+    print(f"  - max_per_domain: {crawler.semaphore_manager.max_per_domain}")
+    print(f"  - requests_per_second: {crawler.rate_limiter.requests_per_second}")
+    print(f"  - min_delay: {crawler.min_delay}s, jitter: {crawler.jitter}s")
+    print(f"  - backoff: base={crawler.backoff_base}s, max={crawler.backoff_max}s")
+    print()
+
+    try:
+        results = await crawler.crawl(
+            start_urls=DAY4_URLS,
+            max_pages=10,
+            same_domain_only=False,
+        )
+
+        print("\n" + "=" * 70)
+        print("ФИНАЛЬНАЯ СТАТИСТИКА")
+        print("=" * 70)
+        print(f"✅ Успешно обработано: {len(results)} страниц")
+        print(f"❌ Ошибок: {len(crawler.failed_urls)}")
+        print(f"🚫 Robots.txt: {len(crawler.blocked_urls)}")
+        print(f"⚡ Текущий RPS: {crawler.get_current_rps():.2f} req/sec")
+        print(f"⏱ Средняя задержка: {crawler.get_average_delay():.3f}s")
+        print(f"⏰ Общее время: {crawler.get_elapsed_time():.2f}s")
+        print(f"📊 Всего запросов: {crawler._total_requests}")
+
+        if crawler.failed_urls:
+            print("\nСтраницы с ошибками:")
+            for url, error in crawler.failed_urls.items():
+                print(f"  - {url}: {error}")
+
+        if results:
+            print("\nПример результата:")
+            first = results[0]
+            print(f"  URL: {first['url']}")
+            print(f"  Заголовок: {first.get('title', 'N/A')}")
+            print(f"  Ссылок: {len(first.get('links', []))}")
+            print(f"  Изображений: {len(first.get('images', []))}")
+
+    finally:
+        await crawler.close()
+
 async def main() -> None:
     await demo_day1_loading()
     await demo_day2_parsing()
     await demo_day3_crawling()
+    await demo_day4_monitoring()
 
 if __name__ == "__main__":
     asyncio.run(main())
