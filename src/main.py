@@ -1,4 +1,5 @@
 from crawler import AsyncCrawler
+from exceptions import TransientError, NetworkError
 
 import time
 import json
@@ -315,9 +316,8 @@ async def demo_day4_monitoring() -> None:
         user_agent="Day4Demo/1.0",
         min_delay=0.3,
         jitter=0.2,
-        backoff_base=1.0,
-        backoff_max=10.0,
-        backoff_max_retries=3,
+        backoff_factor=1.0,
+        max_retries=3,
     )
 
     print(f"Конфигурация:")
@@ -325,7 +325,7 @@ async def demo_day4_monitoring() -> None:
     print(f"  - max_per_domain: {crawler.semaphore_manager.max_per_domain}")
     print(f"  - requests_per_second: {crawler.rate_limiter.requests_per_second}")
     print(f"  - min_delay: {crawler.min_delay}s, jitter: {crawler.jitter}s")
-    print(f"  - backoff: base={crawler.backoff_base}s, max={crawler.backoff_max}s")
+    print(f"  - backoff_factor={crawler.backoff_factor}s, max_retries={crawler.max_retries}s")
     print()
 
     try:
@@ -362,11 +362,170 @@ async def demo_day4_monitoring() -> None:
     finally:
         await crawler.close()
 
+# --------------------------------------------------------------------------
+# День 5: retry, exponential backoff, timeout и статистика ошибок
+# --------------------------------------------------------------------------
+
+DAY5_URLS = [
+    "https://httpbingo.org/status/200",
+    "https://httpbingo.org/status/404",
+    "https://httpbingo.org/status/429",
+    "https://httpbingo.org/status/503",
+    "https://this-domain-does-not-exist-12345.com",
+]
+
+
+def save_day5_report(
+    report: dict,
+    filename: str = "day5_retry_report.json",
+) -> Path:
+    output_path = Path(filename)
+
+    output_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    return output_path
+
+
+async def demo_day5_retry_and_errors() -> None:
+    print("\n" + "#" * 70)
+    print("# ДЕНЬ 5: Retry, backoff, timeout и статистика ошибок")
+    print("#" * 70)
+
+    crawler = AsyncCrawler(
+        max_concurrent=5,
+        max_retries=3,
+        backoff_factor=0.25,
+        retry_on=[
+            TransientError,
+            NetworkError,
+        ],
+        retry_limits={
+            TransientError: 3,
+            NetworkError: 2,
+        },
+        backoff_factors={
+            TransientError: 0.25,
+            NetworkError: 0.5,
+        },
+        total_timeout=10.0,
+        connect_timeout=5.0,
+        read_timeout=5.0,
+        timeout_backoff_factor=1.5,
+        max_timeout=30.0,
+    )
+
+    print("Конфигурация retry:")
+    print(f"  - Общий лимит повторов: {crawler.retry_strategy.max_retries}")
+    print("  - Лимиты по типам: TransientError=3, NetworkError=2")
+    print("  - Backoff: TransientError=0.25с, NetworkError=0.5с")
+    print("  - Timeout: total=10с, connect=5с, read=5с")
+    print("  - Рост timeout: x1.5, максимум=30с")
+
+    print("\nПроверяем URL:")
+    for url in DAY5_URLS:
+        print(f"  - {url}")
+
+    try:
+        results = await crawler.fetch_urls(DAY5_URLS)
+        statistics = crawler.get_error_statistics()
+
+        print("\n" + "=" * 70)
+        print("РЕЗУЛЬТАТЫ ЗАГРУЗКИ")
+        print("=" * 70)
+
+        for url, content in results.items():
+            if content:
+                print(f"[OK]    {url}: {len(content)} символов")
+            else:
+                print(f"[ERROR] {url}")
+
+        print("\n" + "=" * 70)
+        print("СТАТИСТИКА RETRY И ОШИБОК")
+        print("=" * 70)
+
+        print(f"Всего HTTP-попыток: {crawler._total_requests}")
+
+        print(
+            "Успешных операций после retry: "
+            f"{statistics['successful_retries']}"
+        )
+
+        print(f"Задержки retry: {statistics['retry_delays']}")
+
+        print(
+            "Средняя задержка retry: "
+            f"{statistics['average_retry_delay']:.2f} сек."
+        )
+
+        print("\nОшибки по типам:")
+
+        if statistics["errors_by_type"]:
+            for error_type, count in statistics["errors_by_type"].items():
+                print(f"  - {error_type}: {count}")
+        else:
+            print("  - Ошибок нет")
+
+        print("\nURL с постоянными ошибками:")
+
+        if statistics["permanent_error_urls"]:
+            for url in statistics["permanent_error_urls"]:
+                print(f"  - {url}")
+        else:
+            print("  - Нет")
+
+        print("\nНеудачные URL:")
+
+        if statistics["failed_urls"]:
+            for url, error in statistics["failed_urls"].items():
+                print(f"  - {url}: {error}")
+        else:
+            print("  - Нет")
+
+        report = {
+            "day": 5,
+            "topic": "retry, exponential backoff, timeout handling",
+            "configuration": {
+                "max_retries": crawler.retry_strategy.max_retries,
+                "retry_limits": {
+                    "TransientError": 3,
+                    "NetworkError": 2,
+                },
+                "backoff_factors": {
+                    "TransientError": 0.25,
+                    "NetworkError": 0.5,
+                },
+                "total_timeout": crawler.total_timeout,
+                "connect_timeout": crawler.connect_timeout,
+                "read_timeout": crawler.read_timeout,
+                "timeout_backoff_factor": crawler.timeout_backoff_factor,
+                "max_timeout": crawler.max_timeout,
+            },
+            "results": {
+                url: {
+                    "success": bool(content),
+                    "content_length": len(content),
+                }
+                for url, content in results.items()
+            },
+            "statistics": statistics,
+        }
+
+        output_path = save_day5_report(report)
+
+        print(f"\nОтчёт сохранён: {output_path.resolve()}")
+
+    finally:
+        await crawler.close()
+
 async def main() -> None:
     await demo_day1_loading()
     await demo_day2_parsing()
     await demo_day3_crawling()
     await demo_day4_monitoring()
+    await demo_day5_retry_and_errors()
 
 if __name__ == "__main__":
     asyncio.run(main())
