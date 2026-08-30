@@ -3,7 +3,9 @@ import time
 from unittest.mock import patch, AsyncMock, MagicMock
 import aiohttp
 import pytest
+import pytest_asyncio
 from bs4 import BeautifulSoup
+from datetime import datetime, timezone
 
 from crawler import AsyncCrawler
 from main import load_sequentially
@@ -16,6 +18,9 @@ from exceptions import (
     TransientError,
     PermanentError
 )
+from csv_storage import CSVStorage
+from json_storage import JSONStorage
+from postgresql_storage import PostgreSQLStorage
 
 @pytest.fixture
 def mock_session():
@@ -1310,6 +1315,228 @@ async def test_error_statistics():
     assert statistics["retry_delays"] == [2.0, 4.0]
     assert statistics["successful_retries"] == 1
     assert statistics["average_retry_delay"] == 3.0
+
+# --------------------------------------------------------------------------
+# День 6: интеграция AsyncCrawler и PostgreSQL
+# --------------------------------------------------------------------------
+
+TEST_DATABASE = "crawler_db"
+TEST_USER = "ilyashik"
+
+@pytest.fixture
+def sample_page() -> dict:
+    return {
+        "url": "https://example.com/test-page",
+        "title": "Тестовая страница",
+        "text": "Тестовый текст страницы для проверки хранения.",
+        "links": [
+            "https://example.com/about",
+            "https://example.com/contact",
+        ],
+        "metadata": {
+            "language": "ru",
+            "description": "Тестовые метаданные",
+        },
+        "images": [
+            {
+                "src": "https://example.com/image.png",
+                "alt": "Тестовое изображение",
+            }
+        ],
+        "headings": [
+            {
+                "level": "h1",
+                "text": "Заголовок теста",
+            }
+        ],
+        "tables": [],
+        "lists": [],
+        "crawled_at": datetime.now(
+            timezone.utc
+        ).isoformat(),
+        "status_code": 200,
+        "content_type": "text/html",
+    }
+
+
+@pytest_asyncio.fixture
+async def postgres_storage():
+    storage = PostgreSQLStorage(
+        database=TEST_DATABASE,
+        user=TEST_USER,
+    )
+
+    await storage.init_db()
+
+    async with storage.pool.acquire() as connection:
+        await connection.execute(
+            "TRUNCATE TABLE pages RESTART IDENTITY;"
+        )
+
+    yield storage
+
+    async with storage.pool.acquire() as connection:
+        await connection.execute(
+            "TRUNCATE TABLE pages RESTART IDENTITY;"
+        )
+
+    await storage.close()
+
+
+# --------------------------------------------------------------------------
+# 1. Сохранение в JSON
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_save_to_json(
+    tmp_path,
+    sample_page,
+) -> None:
+    storage = JSONStorage(
+        filename=str(tmp_path / "pages.json"),
+    )
+
+    await storage.save(sample_page)
+
+    pages = await storage.load_all()
+
+    assert len(pages) == 1
+    assert pages[0]["url"] == sample_page["url"]
+    assert pages[0]["title"] == sample_page["title"]
+
+    await storage.close()
+
+
+# --------------------------------------------------------------------------
+# 2. Сохранение в CSV
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_save_to_csv(
+    tmp_path,
+    sample_page,
+) -> None:
+    storage = CSVStorage(
+        filename=str(tmp_path / "pages.csv"),
+    )
+
+    await storage.save(sample_page)
+
+    pages = await storage.load_all()
+
+    assert len(pages) == 1
+    assert pages[0]["url"] == sample_page["url"]
+    assert pages[0]["title"] == sample_page["title"]
+    assert pages[0]["status_code"] == sample_page["status_code"]
+
+    await storage.close()
+
+
+# --------------------------------------------------------------------------
+# 3. Сохранение в PostgreSQL
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_save_to_postgresql(
+    postgres_storage,
+    sample_page,
+) -> None:
+    await postgres_storage.save(sample_page)
+
+    pages = await postgres_storage.load_all()
+
+    assert len(pages) == 1
+    assert pages[0]["url"] == sample_page["url"]
+    assert pages[0]["title"] == sample_page["title"]
+    assert pages[0]["text_content"] == sample_page["text"]
+    assert pages[0]["status_code"] == sample_page["status_code"]
+    assert pages[0]["content_type"] == sample_page["content_type"]
+
+
+# --------------------------------------------------------------------------
+# 4. Обработка ошибки записи
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_json_storage_write_error(
+    tmp_path,
+    sample_page,
+    monkeypatch,
+) -> None:
+    storage = JSONStorage(
+        filename=str(tmp_path / "pages.json"),
+    )
+
+    async def raise_write_error(*args, **kwargs) -> None:
+        raise OSError("Имитация ошибки записи")
+
+    monkeypatch.setattr(
+        storage,
+        "save",
+        raise_write_error,
+    )
+
+    with pytest.raises(
+        OSError,
+        match="Имитация ошибки записи",
+    ):
+        await storage.save(sample_page)
+
+    await storage.close()
+
+
+# --------------------------------------------------------------------------
+# 5. Проверка целостности данных
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_data_integrity_in_all_storages(
+    tmp_path,
+    postgres_storage,
+    sample_page,
+) -> None:
+    json_storage = JSONStorage(
+        filename=str(tmp_path / "pages.json"),
+    )
+
+    csv_storage = CSVStorage(
+        filename=str(tmp_path / "pages.csv"),
+    )
+
+    await json_storage.save(sample_page)
+    await csv_storage.save(sample_page)
+    await postgres_storage.save(sample_page)
+
+    json_page = (await json_storage.load_all())[0]
+    csv_page = (await csv_storage.load_all())[0]
+    postgres_page = (await postgres_storage.load_all())[0]
+
+    for page in (json_page, csv_page):
+        assert page["url"] == sample_page["url"]
+        assert page["title"] == sample_page["title"]
+        assert page["text"] == sample_page["text"]
+        assert page["links"] == sample_page["links"]
+        assert page["metadata"] == sample_page["metadata"]
+        assert page["images"] == sample_page["images"]
+        assert page["headings"] == sample_page["headings"]
+        assert page["tables"] == sample_page["tables"]
+        assert page["lists"] == sample_page["lists"]
+        assert page["crawled_at"] == sample_page["crawled_at"]
+        assert page["status_code"] == sample_page["status_code"]
+        assert page["content_type"] == sample_page["content_type"]
+
+    assert postgres_page["url"] == sample_page["url"]
+    assert postgres_page["title"] == sample_page["title"]
+    assert postgres_page["text_content"] == sample_page["text"]
+    assert postgres_page["links"] == sample_page["links"]
+    assert postgres_page["metadata"] == sample_page["metadata"]
+    assert postgres_page["status_code"] == sample_page["status_code"]
+    assert postgres_page["content_type"] == sample_page["content_type"]
+
+    assert postgres_page["crawled_at"].tzinfo is not None
+
+    await json_storage.close()
+    await csv_storage.close()
 
 if __name__ == "__main__":
     import sys

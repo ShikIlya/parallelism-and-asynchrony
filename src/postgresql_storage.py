@@ -132,7 +132,7 @@ class PostgreSQLStorage(DataStorage):
         await self.init_db()
 
         query = """
-            SELECT
+            SELECT 
                 id,
                 url,
                 title,
@@ -152,10 +152,24 @@ class PostgreSQLStorage(DataStorage):
                 query
             )
 
-        return [
-            dict(row)
-            for row in rows
-        ]
+        pages = []
+
+        for row in rows:
+            page = dict(row)
+
+            if isinstance(page["links"], str):
+                page["links"] = json.loads(
+                    page["links"]
+                )
+
+            if isinstance(page["metadata"], str):
+                page["metadata"] = json.loads(
+                    page["metadata"]
+                )
+
+            pages.append(page)
+
+        return pages
 
     async def close(self) -> None:
         if self.pool is not None:
