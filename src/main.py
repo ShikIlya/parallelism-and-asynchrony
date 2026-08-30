@@ -1,5 +1,9 @@
 from crawler import AsyncCrawler
 from exceptions import TransientError, NetworkError
+from postgresql_storage import PostgreSQLStorage
+from csv_storage import CSVStorage
+from json_storage import JSONStorage
+from multi_storage import MultiStorage
 
 import time
 import json
@@ -520,12 +524,251 @@ async def demo_day5_retry_and_errors() -> None:
     finally:
         await crawler.close()
 
+# --------------------------------------------------------------------------
+# День 6: интеграция AsyncCrawler и PostgreSQL
+# --------------------------------------------------------------------------
+
+DAY6_URLS = [
+    "https://example.com",
+]
+
+DAY6_OUTPUT_DIR = Path("output")
+DAY6_JSON_FILE = DAY6_OUTPUT_DIR / "day6_pages.json"
+DAY6_CSV_FILE = DAY6_OUTPUT_DIR / "day6_pages.csv"
+
+def get_page_text(page: dict) -> str:
+    return page.get(
+        "text",
+        page.get("text_content", ""),
+    )
+
+def calculate_day6_statistics(
+    pages: list[dict],
+) -> dict:
+    return {
+        "total_pages": len(pages),
+        "unique_urls": len(
+            {
+                page.get("url")
+                for page in pages
+                if page.get("url")
+            }
+        ),
+        "successful_pages": sum(
+            1
+            for page in pages
+            if page.get("status_code") == 200
+        ),
+        "total_links": sum(
+            len(page.get("links", []))
+            for page in pages
+            if isinstance(page.get("links"), list)
+        ),
+        "total_text_length": sum(
+            len(get_page_text(page))
+            for page in pages
+        ),
+    }
+
+def print_day6_statistics(
+    storage_name: str,
+    pages: list[dict],
+) -> None:
+    statistics = calculate_day6_statistics(pages)
+
+    print(f"\n{storage_name}:")
+    print(f"  Всего сохранено      : {statistics['total_pages']}")
+    print(f"  Уникальных URL       : {statistics['unique_urls']}")
+    print(f"  Успешных HTTP 200    : {statistics['successful_pages']}")
+    print(f"  Всего найдено ссылок : {statistics['total_links']}")
+    print(
+        "  Суммарный текст      : "
+        f"{statistics['total_text_length']} символов"
+    )
+
+def print_day6_saved_page(
+    storage_name: str,
+    pages: list[dict],
+) -> None:
+    print("\n" + "-" * 70)
+    print(f"ЧТЕНИЕ СОХРАНЁННЫХ ДАННЫХ ИЗ {storage_name}")
+    print("-" * 70)
+
+    if not pages:
+        print("Сохранённые записи не найдены.")
+        return
+
+    page = pages[-1]
+    text = get_page_text(page)
+
+    print(f"URL          : {page.get('url')}")
+    print(f"Заголовок    : {page.get('title') or '(не найден)'}")
+    print(f"HTTP-статус  : {page.get('status_code')}")
+    print(f"Время обхода : {page.get('crawled_at')}")
+    print(f"Текст        : {text[:120]!r}")
+    print(f"Ссылок       : {len(page.get('links', []))}")
+    print(f"Metadata     : {page.get('metadata', {})}")
+
+
+async def demo_day6_storage() -> None:
+    print("\n" + "#" * 70)
+    print("# ДЕНЬ 6: Краулинг и сохранение в JSON, CSV, PostgreSQL")
+    print("#" * 70)
+
+    DAY6_OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    json_storage = JSONStorage(
+        filename=str(DAY6_JSON_FILE),
+        indent=None,
+    )
+
+    csv_storage = CSVStorage(
+        filename=str(DAY6_CSV_FILE),
+    )
+
+    postgresql_storage = PostgreSQLStorage()
+
+    storage = MultiStorage(
+        [
+            json_storage,
+            csv_storage,
+            postgresql_storage,
+        ]
+    )
+
+    crawler = AsyncCrawler(
+        max_concurrent=1,
+        max_per_domain=1,
+        max_depth=0,
+        requests_per_second=1.0,
+        respect_robots=True,
+        user_agent="AsyncCrawlerDay6/1.0",
+        storage=storage,
+    )
+
+    try:
+        print("\nПараметры:")
+        print(f"  Стартовые URL : {DAY6_URLS}")
+        print("  Лимит страниц : 1")
+        print("  Макс. глубина : 0")
+        print(f"  JSON          : {DAY6_JSON_FILE.resolve()}")
+        print(f"  CSV           : {DAY6_CSV_FILE.resolve()}")
+        print("  PostgreSQL    : crawler_db")
+
+        started_at = time.perf_counter()
+
+        crawl_results = await crawler.crawl(
+            start_urls=DAY6_URLS,
+            max_pages=1,
+            same_domain_only=True,
+        )
+
+        elapsed = time.perf_counter() - started_at
+
+        print("\n" + "=" * 70)
+        print("РЕЗУЛЬТАТ КРАУЛИНГА")
+        print("=" * 70)
+        print(f"Успешно обработано : {len(crawl_results)}")
+        print(f"Ошибок             : {len(crawler.failed_urls)}")
+        print(f"HTTP-запросов      : {crawler._total_requests}")
+        print(f"Время работы       : {elapsed:.2f} сек.")
+
+        if crawler.failed_urls:
+            print("\nНеудачные URL:")
+            for url, error in crawler.failed_urls.items():
+                print(f"- {url}: {error}")
+
+        json_pages = await json_storage.load_all()
+        csv_pages = await csv_storage.load_all()
+        postgres_pages = await postgresql_storage.load_all()
+
+        print("\n" + "=" * 70)
+        print("СТАТИСТИКА СОХРАНЁННЫХ ДАННЫХ")
+        print("=" * 70)
+
+        print_day6_statistics(
+            "JSON",
+            json_pages,
+        )
+
+        print_day6_statistics(
+            "CSV",
+            csv_pages,
+        )
+
+        print_day6_statistics(
+            "PostgreSQL",
+            postgres_pages,
+        )
+
+        print_day6_saved_page(
+            "JSON",
+            json_pages,
+        )
+
+        print_day6_saved_page(
+            "CSV",
+            csv_pages,
+        )
+
+        print_day6_saved_page(
+            "PostgreSQL",
+            postgres_pages,
+        )
+
+        report = {
+            "day": 6,
+            "topic": (
+                "Crawling and storage in JSON, CSV, PostgreSQL"
+            ),
+            "crawl": {
+                "start_urls": DAY6_URLS,
+                "successful_pages": len(crawl_results),
+                "failed_pages": len(crawler.failed_urls),
+                "failed_urls": crawler.failed_urls,
+                "requests_count": crawler._total_requests,
+                "elapsed_seconds": round(elapsed, 3),
+            },
+            "storage_statistics": {
+                "json": calculate_day6_statistics(
+                    json_pages
+                ),
+                "csv": calculate_day6_statistics(
+                    csv_pages
+                ),
+                "postgresql": calculate_day6_statistics(
+                    postgres_pages
+                ),
+            },
+        }
+
+        report_path = DAY6_OUTPUT_DIR / "day6_report.json"
+
+        report_path.write_text(
+            json.dumps(
+                report,
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            ),
+            encoding="utf-8",
+        )
+
+        print(f"\nОтчёт сохранён: {report_path.resolve()}")
+
+    finally:
+        await crawler.close()
+
 async def main() -> None:
     await demo_day1_loading()
     await demo_day2_parsing()
     await demo_day3_crawling()
     await demo_day4_monitoring()
     await demo_day5_retry_and_errors()
+    await demo_day6_storage()
 
 if __name__ == "__main__":
     asyncio.run(main())

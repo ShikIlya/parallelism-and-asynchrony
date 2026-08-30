@@ -4,6 +4,7 @@ import logging
 from urllib.parse import urlparse, urlunparse
 import random
 import time
+from datetime import datetime, timezone
 
 from html_parser import HTMLParser
 from crawler_queue import CrawlerQueue
@@ -12,6 +13,7 @@ from rate_limiter import RateLimiter
 from robots_parser import RobotsParser
 from retry_strategy import RetryStrategy
 from exceptions import TransientError, PermanentError, NetworkError, ParseError
+from data_storage import DataStorage
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +38,8 @@ class AsyncCrawler:
         connect_timeout: float = 10.0,
         read_timeout: float = 20.0,
         timeout_backoff_factor: float = 1.5,
-        max_timeout: float = 120.0
+        max_timeout: float = 120.0,
+        storage: DataStorage | None = None,
     ):
         if max_concurrent <= 0:
             raise ValueError("max_concurrent must be positive")
@@ -102,6 +105,7 @@ class AsyncCrawler:
         self.max_timeout = max_timeout
         self.max_retries = max_retries
         self.backoff_factor = backoff_factor
+        self.storage = storage
 
         self.blocked_urls: dict[str, str] = {}
         self.visited_urls: set[str] = set()
@@ -329,7 +333,8 @@ class AsyncCrawler:
             }
 
         try:
-            return await self.parser.parse_html(html, url)
+            result = await self.parser.parse_html(html, url)
+
         except Exception as error:
             parse_error = ParseError(f"Parse error for {url}: {error}")
 
@@ -353,6 +358,24 @@ class AsyncCrawler:
                 "lists": [],
                 "error": str(parse_error),
             }
+
+        result["crawled_at"] = datetime.now(
+            timezone.utc
+        ).isoformat()
+        result["status_code"] = 200
+        result["content_type"] = "text/html"
+
+        if self.storage is not None:
+            try:
+                await self.storage.save(result)
+
+            except Exception:
+                logger.exception(
+                    "Ошибка сохранения данных URL %s",
+                    url,
+                )
+
+        return result
 
     async def crawl(
         self,
@@ -484,7 +507,10 @@ class AsyncCrawler:
         if self.session is not None and not self.session.closed:
             await self.session.close()
 
-        logger.info("HTTP-сессия закрыта")
+        if self.storage is not None:
+            await self.storage.close()
+
+        logger.info("HTTP-сессия и storage закрыты")
 
 
     @staticmethod
