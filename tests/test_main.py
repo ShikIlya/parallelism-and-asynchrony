@@ -11,6 +11,11 @@ from html_parser import HTMLParser
 from crawler_queue import CrawlerQueue
 from rate_limiter import RateLimiter
 from robots_parser import RobotsParser
+from retry_strategy import RetryStrategy
+from exceptions import (
+    TransientError,
+    PermanentError
+)
 
 @pytest.fixture
 def mock_session():
@@ -64,7 +69,7 @@ async def test_fetch_url_valid_returns_content():
 
     patch_session_get(
         crawler,
-        lambda u: make_mock_response(status=200, body="<html>hello world</html>"),
+        lambda u, **kwargs: make_mock_response(status=200, body="<html>hello world</html>"),
     )
 
     content = await crawler.fetch_url(url)
@@ -78,7 +83,7 @@ async def test_fetch_urls_multiple_valid():
     urls = [f"https://example.com/page{i}" for i in range(3)]
     crawler = AsyncCrawler(max_concurrent=10)
 
-    def side_effect(u):
+    def side_effect(u, **kwargs):
         return make_mock_response(status=200, body=f"content-{u}")
 
     patch_session_get(crawler, side_effect)
@@ -141,7 +146,7 @@ async def test_fetch_urls_mixed_valid_and_invalid():
         request_info=MagicMock(), history=(), status=404, message="not found"
     )
 
-    def side_effect(u):
+    def side_effect(u, **kwargs):
         if u == good_url:
             return make_mock_response(status=200, body="ok-content")
         return make_mock_response(status=404, body="not found", raise_error=error)
@@ -1148,6 +1153,163 @@ class TestRateLimiterIntegration:
         await crawler.fetch_url("https://example.com")
         mock_limiter.acquire.assert_called_once_with("example.com")
         await crawler.close()
+
+# --------------------------------------------------------------------------
+# День 5: retry strategy
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_retry_on_timeout():
+    strategy = RetryStrategy(
+        max_retries=3,
+        backoff_factor=1.0,
+    )
+
+    operation = AsyncMock(
+        side_effect=[
+            TransientError(
+                "Request timeout for https://example.com"
+            ),
+            "success",
+        ]
+    )
+
+    with patch(
+        "retry_strategy.asyncio.sleep",
+        new=AsyncMock(),
+    ) as sleep_mock:
+        result = await strategy.execute_with_retry(operation)
+
+    assert result == "success"
+    assert operation.await_count == 2
+    sleep_mock.assert_awaited_once_with(1.0)
+
+    assert strategy.errors_by_type == {
+        "TransientError": 1,
+    }
+    assert strategy.retry_delays == [1.0]
+    assert strategy.successful_retries == 1
+
+@pytest.mark.asyncio
+async def test_retry_on_http_503():
+    strategy = RetryStrategy(
+        max_retries=3,
+        backoff_factor=1.0,
+    )
+
+    operation = AsyncMock(
+        side_effect=[
+            TransientError("HTTP 503 https://example.com"),
+            "success",
+        ]
+    )
+
+    with patch(
+        "retry_strategy.asyncio.sleep",
+        new=AsyncMock(),
+    ) as sleep_mock:
+        result = await strategy.execute_with_retry(operation)
+
+    assert result == "success"
+    assert operation.await_count == 2
+    sleep_mock.assert_awaited_once_with(1.0)
+
+    assert strategy.get_statistics() == {
+        "errors_by_type": {
+            "TransientError": 1,
+        },
+        "retry_delays": [1.0],
+        "successful_retries": 1,
+        "average_retry_delay": 1.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_http_404_is_not_retried():
+    strategy = RetryStrategy(
+        max_retries=3,
+        backoff_factor=1.0,
+    )
+
+    operation = AsyncMock(
+        side_effect=PermanentError("HTTP 404 https://example.com/missing")
+    )
+
+    with patch(
+        "retry_strategy.asyncio.sleep",
+        new=AsyncMock(),
+    ) as sleep_mock:
+        with pytest.raises(PermanentError, match="HTTP 404"):
+            await strategy.execute_with_retry(operation)
+
+    assert operation.await_count == 1
+    sleep_mock.assert_not_awaited()
+    assert strategy.errors_by_type == {
+        "PermanentError": 1,
+    }
+    assert strategy.retry_delays == []
+    assert strategy.successful_retries == 0
+
+
+@pytest.mark.asyncio
+async def test_exponential_backoff():
+    strategy = RetryStrategy(
+        max_retries=3,
+        backoff_factor=2.0,
+    )
+
+    operation = AsyncMock(
+        side_effect=[
+            TransientError("HTTP 503"),
+            TransientError("HTTP 503"),
+            TransientError("HTTP 503"),
+            "success",
+        ]
+    )
+
+    with patch(
+        "retry_strategy.asyncio.sleep",
+        new=AsyncMock(),
+    ) as sleep_mock:
+        result = await strategy.execute_with_retry(operation)
+
+    assert result == "success"
+    assert operation.await_count == 4
+    assert strategy.retry_delays == [2.0, 4.0, 8.0]
+    assert sleep_mock.await_args_list[0].args == (2.0,)
+    assert sleep_mock.await_args_list[1].args == (4.0,)
+    assert sleep_mock.await_args_list[2].args == (8.0,)
+
+
+@pytest.mark.asyncio
+async def test_error_statistics():
+    strategy = RetryStrategy(
+        max_retries=3,
+        backoff_factor=2.0,
+    )
+
+    operation = AsyncMock(
+        side_effect=[
+            TransientError("HTTP 503"),
+            TransientError("HTTP 503"),
+            "success",
+        ]
+    )
+
+    with patch(
+        "retry_strategy.asyncio.sleep", new=AsyncMock()):
+        result = await strategy.execute_with_retry(operation)
+
+    assert result == "success"
+
+    statistics = strategy.get_statistics()
+
+    assert statistics["errors_by_type"] == {
+        "TransientError": 2,
+    }
+    assert statistics["retry_delays"] == [2.0, 4.0]
+    assert statistics["successful_retries"] == 1
+    assert statistics["average_retry_delay"] == 3.0
 
 if __name__ == "__main__":
     import sys
