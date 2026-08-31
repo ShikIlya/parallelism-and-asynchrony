@@ -4,6 +4,7 @@ import json
 from io import StringIO
 
 import aiofiles
+import asyncio
 
 from data_storage import DataStorage
 
@@ -16,6 +17,8 @@ class CSVStorage(DataStorage):
         self.path = Path(filename)
         self.encoding = encoding
         self.fieldnames: list[str] | None = None
+
+        self._lock = asyncio.Lock()
 
     @staticmethod
     def _prepare_row(data: dict) -> dict:
@@ -36,42 +39,43 @@ class CSVStorage(DataStorage):
         return row
 
     async def save(self, data: dict) -> None:
-        self.path.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
+        async with self._lock:
+            self.path.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
 
-        row = self._prepare_row(data)
+            row = self._prepare_row(data)
 
-        is_first_row = self.fieldnames is None
+            is_first_row = self.fieldnames is None
 
-        if is_first_row:
-            self.fieldnames = list(row.keys())
+            if is_first_row:
+                self.fieldnames = list(row.keys())
 
-        buffer = StringIO(
-            newline="",
-        )
+            buffer = StringIO(
+                newline="",
+            )
 
-        writer = csv.DictWriter(
-            buffer,
-            fieldnames=self.fieldnames,
-            extrasaction="ignore",
-        )
+            writer = csv.DictWriter(
+                buffer,
+                fieldnames=self.fieldnames,
+                extrasaction="ignore",
+            )
 
-        if is_first_row:
-            writer.writeheader()
+            if is_first_row:
+                writer.writeheader()
 
-        writer.writerow(row)
+            writer.writerow(row)
 
-        async with aiofiles.open(
+            async with aiofiles.open(
                 self.path,
                 mode="a",
                 encoding=self.encoding,
                 newline="",
-        ) as file:
-            await file.write(
-                buffer.getvalue()
-            )
+            ) as file:
+                await file.write(
+                    buffer.getvalue()
+                )
 
     @staticmethod
     def _restore_value(value: str):
@@ -89,15 +93,16 @@ class CSVStorage(DataStorage):
         return value
 
     async def load_all(self) -> list[dict]:
-        if not self.path.exists():
-            return []
+        async with self._lock:
+            if not self.path.exists():
+                return []
 
-        async with aiofiles.open(
-                self.path,
-                mode="r",
-                encoding=self.encoding,
-        ) as file:
-            content = await file.read()
+            async with aiofiles.open(
+                    self.path,
+                    mode="r",
+                    encoding=self.encoding,
+            ) as file:
+                content = await file.read()
 
         reader = csv.DictReader(
             StringIO(content),
