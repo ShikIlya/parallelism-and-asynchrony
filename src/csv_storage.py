@@ -7,16 +7,21 @@ import aiofiles
 import asyncio
 
 from data_storage import DataStorage
+from storage_retry import run_with_retry
 
 class CSVStorage(DataStorage):
     def __init__(
         self,
         filename: str,
         encoding: str = "utf-8",
+        max_retries: int = 3,
+        backoff_factor: float = 0.5,
     ):
         self.path = Path(filename)
         self.encoding = encoding
         self.fieldnames: list[str] | None = None
+        self.max_retries = max_retries
+        self.backoff_factor = backoff_factor
 
         self._lock = asyncio.Lock()
 
@@ -39,43 +44,51 @@ class CSVStorage(DataStorage):
         return row
 
     async def save(self, data: dict) -> None:
-        async with self._lock:
-            self.path.parent.mkdir(
-                parents=True,
-                exist_ok=True,
-            )
-
-            row = self._prepare_row(data)
-
-            is_first_row = self.fieldnames is None
-
-            if is_first_row:
-                self.fieldnames = list(row.keys())
-
-            buffer = StringIO(
-                newline="",
-            )
-
-            writer = csv.DictWriter(
-                buffer,
-                fieldnames=self.fieldnames,
-                extrasaction="ignore",
-            )
-
-            if is_first_row:
-                writer.writeheader()
-
-            writer.writerow(row)
-
-            async with aiofiles.open(
-                self.path,
-                mode="a",
-                encoding=self.encoding,
-                newline="",
-            ) as file:
-                await file.write(
-                    buffer.getvalue()
+        async def write() -> None:
+            async with self._lock:
+                self.path.parent.mkdir(
+                    parents=True,
+                    exist_ok=True,
                 )
+
+                row = self._prepare_row(data)
+
+                is_first_row = self.fieldnames is None
+
+                if is_first_row:
+                    self.fieldnames = list(row.keys())
+
+                buffer = StringIO(
+                    newline="",
+                )
+
+                writer = csv.DictWriter(
+                    buffer,
+                    fieldnames=self.fieldnames,
+                    extrasaction="ignore",
+                )
+
+                if is_first_row:
+                    writer.writeheader()
+
+                writer.writerow(row)
+
+                async with aiofiles.open(
+                    self.path,
+                    mode="a",
+                    encoding=self.encoding,
+                    newline="",
+                ) as file:
+                    await file.write(
+                        buffer.getvalue()
+                    )
+
+        await run_with_retry(
+            operation=write,
+            retry_exceptions=(OSError,),
+            max_retries=self.max_retries,
+            backoff_factor=self.backoff_factor,
+        )
 
     @staticmethod
     def _restore_value(value: str):

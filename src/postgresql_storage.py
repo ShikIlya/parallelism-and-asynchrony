@@ -4,6 +4,7 @@ import json
 from datetime import datetime
 
 from data_storage import DataStorage
+from storage_retry import run_with_retry
 
 class PostgreSQLStorage(DataStorage):
     def __init__(
@@ -12,11 +13,15 @@ class PostgreSQLStorage(DataStorage):
         user: str = "ilyashik",
         host: str = "localhost",
         port: int = 5432,
+        max_retries: int = 3,
+        backoff_factor: float = 0.5,
     ):
         self.database = database
         self.user = user
         self.host = host
         self.port = port
+        self.max_retries = max_retries
+        self.backoff_factor = backoff_factor
 
         self.pool: asyncpg.Pool | None = None
 
@@ -115,18 +120,30 @@ class PostgreSQLStorage(DataStorage):
             );
         """
 
-        async with self.pool.acquire() as connection:
-            await connection.execute(
-                query,
-                data["url"],
-                data.get("title", ""),
-                data.get("text", ""),
-                links,
-                metadata,
-                crawled_at,
-                data.get("status_code"),
-                data.get("content_type"),
-            )
+        async def insert() -> None:
+            async with self.pool.acquire() as connection:
+                await connection.execute(
+                    query,
+                    data["url"],
+                    data.get("title", ""),
+                    data.get("text", ""),
+                    links,
+                    metadata,
+                    crawled_at,
+                    data.get("status_code"),
+                    data.get("content_type"),
+                )
+
+        await run_with_retry(
+            operation=insert,
+            retry_exceptions=(
+                OSError,
+                ConnectionError,
+                asyncpg.PostgresConnectionError,
+            ),
+            max_retries=self.max_retries,
+            backoff_factor=self.backoff_factor,
+        )
 
     async def load_all(self) -> list[dict]:
         await self.init_db()
