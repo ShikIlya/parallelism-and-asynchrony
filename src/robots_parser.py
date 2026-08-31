@@ -73,7 +73,8 @@ class RobotsParser:
 
     def _parse_robots_text(self, text: str) -> dict:
         rules = {}
-        current_agents = []
+        current_agents: list[str] = []
+        has_rules = False
 
         for line in text.splitlines():
             line = line.strip()
@@ -90,7 +91,12 @@ class RobotsParser:
 
             if key == "user-agent":
                 agent = value.lower()
-                current_agents = [agent]
+
+                if has_rules:
+                    current_agents = []
+                    has_rules = False
+
+                current_agents.append(agent)
 
                 if agent not in rules:
                     rules[agent] = {"disallow": [], "crawl_delay": 0.0}
@@ -99,11 +105,15 @@ class RobotsParser:
                 for agent in current_agents:
                     rules[agent]["disallow"].append(value)
 
+                has_rules = True
+
             elif key == "crawl-delay" and current_agents:
                 for agent in current_agents:
                     try:
                         rules[agent]["crawl_delay"] = float(value)
                     except ValueError:
                         pass
+
+                has_rules = True
 
         return rules

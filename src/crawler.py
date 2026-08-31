@@ -140,21 +140,29 @@ class AsyncCrawler:
 
         return self.session
 
-    async def _fetch_url_once(
-            self,
-            url: str,
-            attempt: int = 0,
-    ) -> str:
+    async def _fetch_response_once(
+        self,
+        url: str,
+        attempt: int = 0,
+    ) -> dict:
         parsed = urlparse(url)
         base_url = f"{parsed.scheme}://{parsed.netloc}"
         domain = parsed.netloc
 
         session = await self._get_session()
 
-        crawl_delay = await self._check_robots(url, domain, base_url)
+        crawl_delay = await self._check_robots(
+            url,
+            domain,
+            base_url,
+        )
 
         if crawl_delay < 0:
-            return ""
+            return {
+                "html": "",
+                "status_code": None,
+                "content_type": None,
+            }
 
         await self.rate_limiter.acquire(domain)
         await self._wait_with_delay(crawl_delay)
@@ -162,7 +170,9 @@ class AsyncCrawler:
         try:
             self._record_request()
 
-            timeout_multiplier = self.timeout_backoff_factor ** attempt
+            timeout_multiplier = (
+                self.timeout_backoff_factor ** attempt
+            )
 
             total_timeout = min(
                 self.total_timeout * timeout_multiplier,
@@ -185,93 +195,122 @@ class AsyncCrawler:
                 sock_read=read_timeout,
             )
 
-            async with session.get(url, timeout=request_timeout) as response:
+            async with session.get(
+                url,
+                timeout=request_timeout,
+            ) as response:
                 status = response.status
+                content_type = response.content_type
 
-                if status == 401 or status == 403 or status == 404:
-                    raise PermanentError(f"HTTP {status} {url}")
-                elif status == 429:
-                    raise TransientError(f"HTTP {status} {url}")
-                elif 400 <= status < 500:
-                    raise PermanentError(f"HTTP {status} {url}")
-                elif 500 <= status < 600:
-                    raise TransientError(f"HTTP {status} {url}")
+                if status in {401, 403, 404}:
+                    raise PermanentError(
+                        f"HTTP {status} {url}"
+                    )
 
-                content = await response.text()
+                if status == 429:
+                    raise TransientError(
+                        f"HTTP {status} {url}"
+                    )
+
+                if 400 <= status < 500:
+                    raise PermanentError(
+                        f"HTTP {status} {url}"
+                    )
+
+                if 500 <= status < 600:
+                    raise TransientError(
+                        f"HTTP {status} {url}"
+                    )
+
+                html = await response.text()
 
                 logger.info(
-                "Успешно загружено: %s, статус: %s",
-                url,
-                      response.status,
+                    "Успешно загружено: %s, статус: %s",
+                    url,
+                    status,
                 )
 
-                return content
+                return {
+                    "html": html,
+                    "status_code": status,
+                    "content_type": content_type,
+                }
 
         except asyncio.TimeoutError as error:
-            raise TransientError(f"Request timeout for {url}: {error}") from error
-        except aiohttp.ClientError as error:
-            raise NetworkError(f"Network error for {url}: {error}") from error
+            raise TransientError(
+                f"Request timeout for {url}: {error}"
+            ) from error
 
-    async def fetch_url(self, url: str) -> str:
+        except aiohttp.ClientError as error:
+            raise NetworkError(
+                f"Network error for {url}: {error}"
+            ) from error
+
+    async def _fetch_response(
+        self,
+        url: str,
+    ) -> dict:
         logger.info("Начало загрузки: %s", url)
 
         attempt = 0
 
-        async def fetch_attempt() -> str:
+        async def fetch_attempt() -> dict:
             nonlocal attempt
 
             current_attempt = attempt
             attempt += 1
 
-            return await self._fetch_url_once(
+            return await self._fetch_response_once(
                 url,
                 attempt=current_attempt,
             )
 
         try:
-            content = await self.retry_strategy.execute_with_retry(
-                fetch_attempt
+            response_data = (
+                await self.retry_strategy.execute_with_retry(
+                    fetch_attempt
+                )
             )
 
-            logger.info("Загрузка завершена успешно: %s", url)
+            logger.info(
+                "Загрузка завершена успешно: %s",
+                url,
+            )
 
-            return content
+            return response_data
 
         except PermanentError as error:
             self.failed_urls[url] = str(error)
             self.permanent_error_urls.add(url)
 
             logger.warning(
-           "Постоянная ошибка при загрузке %s: %s. Повтор не будет выполнен.",
-          url,
+                "Постоянная ошибка при загрузке %s: %s. "
+                "Повтор не будет выполнен.",
+                url,
                 error,
             )
-
-            return ""
 
         except TransientError as error:
             self.failed_urls[url] = str(error)
 
             logger.error(
-           "Не удалось загрузить %s: исчерпан лимит повторов (%d). Ошибка: %s",
-          url,
+                "Не удалось загрузить %s: исчерпан лимит "
+                "повторов (%d). Ошибка: %s",
+                url,
                 self.retry_strategy.max_retries,
                 error,
             )
-
-            return ""
 
         except NetworkError as error:
             self.failed_urls[url] = str(error)
 
             logger.error(
-           "Не удалось загрузить %s: исчерпан лимит повторов (%d). Сетевая ошибка: %s",
-          url,
+                "Не удалось загрузить %s: исчерпан лимит "
+                "повторов (%d). Сетевая ошибка: %s",
+                url,
                 self.retry_strategy.max_retries,
                 error,
             )
-
-            return ""
 
         except asyncio.CancelledError:
             raise
@@ -285,7 +324,16 @@ class AsyncCrawler:
                 error,
             )
 
-            return ""
+        return {
+            "html": "",
+            "status_code": None,
+            "content_type": None,
+        }
+
+    async def fetch_url(self, url: str) -> str:
+        response_data = await self._fetch_response(url)
+
+        return response_data["html"]
 
     async def fetch_urls(self, urls: list[str]) -> dict[str, str]:
         tasks = [
@@ -316,7 +364,9 @@ class AsyncCrawler:
         return fetched
 
     async def fetch_and_parse(self, url: str) -> dict:
-        html = await self.fetch_url(url)
+        response_data = await self._fetch_response(url)
+
+        html = response_data["html"]
 
         if not html:
             return {
@@ -362,8 +412,8 @@ class AsyncCrawler:
         result["crawled_at"] = datetime.now(
             timezone.utc
         ).isoformat()
-        result["status_code"] = 200
-        result["content_type"] = "text/html"
+        result["status_code"] = response_data["status_code"]
+        result["content_type"] = response_data["content_type"]
 
         if self.storage is not None:
             try:
