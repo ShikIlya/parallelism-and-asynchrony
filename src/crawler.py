@@ -162,6 +162,7 @@ class AsyncCrawler:
                 "html": "",
                 "status_code": None,
                 "content_type": None,
+                "error": "robots_disallowed"
             }
 
         await self.rate_limiter.acquire(domain)
@@ -202,17 +203,12 @@ class AsyncCrawler:
                 status = response.status
                 content_type = response.content_type
 
-                if status in {401, 403, 404}:
-                    raise PermanentError(
-                        f"HTTP {status} {url}"
-                    )
-
-                if status == 429:
-                    raise TransientError(
-                        f"HTTP {status} {url}"
-                    )
-
                 if 400 <= status < 500:
+                    if status == 429:
+                        raise TransientError(
+                            f"HTTP {status} {url}"
+                        )
+
                     raise PermanentError(
                         f"HTTP {status} {url}"
                     )
@@ -234,6 +230,7 @@ class AsyncCrawler:
                     "html": html,
                     "status_code": status,
                     "content_type": content_type,
+                    "error": None
                 }
 
         except asyncio.TimeoutError as error:
@@ -328,6 +325,7 @@ class AsyncCrawler:
             "html": "",
             "status_code": None,
             "content_type": None,
+            "error": self.failed_urls.get(url, "fetch_failed")
         }
 
     async def fetch_url(self, url: str) -> str:
@@ -379,7 +377,7 @@ class AsyncCrawler:
                 "headings": [],
                 "tables": [],
                 "lists": [],
-                "error": "fetch_failed",
+                "error": response_data.get('error', 'fetch_failed'),
             }
 
         try:
@@ -569,26 +567,32 @@ class AsyncCrawler:
 
         return urlunparse(
             (
-                parsed.scheme,
-                parsed.netloc,
+                parsed.scheme.lower(),
+                parsed.netloc.lower(),
                 parsed.path,
                 parsed.params,
-                "",
+                parsed.query,
                 "",
             )
         )
 
     def _calculate_delay(self, crawl_delay: float) -> float:
-        base_delay = self.rate_limiter.min_interval
+        base_delay = 0.0
 
         if crawl_delay > 0:
-            base_delay = max(base_delay, crawl_delay)
+            base_delay = crawl_delay
 
         if self.min_delay > 0:
-            base_delay = max(base_delay, self.min_delay)
+            base_delay = max(
+                base_delay,
+                self.min_delay,
+            )
 
         if self.jitter > 0:
-            jitter_value = random.uniform(0, self.jitter)
+            jitter_value = random.uniform(
+                0,
+                self.jitter,
+            )
             base_delay += jitter_value
 
         return base_delay

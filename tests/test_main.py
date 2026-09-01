@@ -838,7 +838,7 @@ async def test_exclude_and_include_combined():
         "https://a.com/blog/post-1",
     }
 
-def test_normalize_url_removes_query_and_fragment():
+def test_normalize_url_keeps_query_and_removes_fragment():
     first = AsyncCrawler._normalize_url(
         "https://site/page?utm=1#section"
     )
@@ -846,9 +846,9 @@ def test_normalize_url_removes_query_and_fragment():
         "https://site/page?utm=2"
     )
 
-    assert first == "https://site/page"
-    assert second == "https://site/page"
-    assert first == second
+    assert first == "https://site/page?utm=1"
+    assert second == "https://site/page?utm=2"
+    assert first != second
 
 # --------------------------------------------------------------------------
 # День 4: мониторинг скорости и прогресса
