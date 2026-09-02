@@ -73,6 +73,7 @@ class AsyncCrawler:
             raise ValueError(
                 "read_timeout cannot be greater than total_timeout"
             )
+
         self.session: aiohttp.ClientSession | None = None
         self.parser = HTMLParser()
         self.semaphore_manager = SemaphoreManager(
@@ -165,8 +166,12 @@ class AsyncCrawler:
                 "error": "robots_disallowed"
             }
 
-        await self.rate_limiter.acquire(domain)
-        await self._wait_with_delay(crawl_delay)
+        delay = self._calculate_delay(crawl_delay)
+
+        await self.rate_limiter.acquire(
+            domain,
+            minimum_delay=delay,
+        )
 
         try:
             self._record_request()
@@ -203,20 +208,10 @@ class AsyncCrawler:
                 status = response.status
                 content_type = response.content_type
 
-                if 400 <= status < 500:
-                    if status == 429:
-                        raise TransientError(
-                            f"HTTP {status} {url}"
-                        )
-
-                    raise PermanentError(
-                        f"HTTP {status} {url}"
-                    )
-
-                if 500 <= status < 600:
-                    raise TransientError(
-                        f"HTTP {status} {url}"
-                    )
+                self._raise_for_http_status(
+                    status,
+                    url,
+                )
 
                 html = await response.text()
 
@@ -238,10 +233,43 @@ class AsyncCrawler:
                 f"Request timeout for {url}: {error}"
             ) from error
 
+        except aiohttp.ClientResponseError as error:
+            self._raise_for_http_status(
+                error.status,
+                url
+            )
+
+            raise NetworkError(
+                f"HTTP response error for {url}: {error}"
+            ) from error
+
         except aiohttp.ClientError as error:
             raise NetworkError(
                 f"Network error for {url}: {error}"
             ) from error
+
+    @staticmethod
+    def _raise_for_http_status(
+            status: int | None,
+            url: str,
+    ) -> None:
+        if status is None:
+            return
+
+        if status == 429:
+            raise TransientError(
+                f"HTTP {status} {url}"
+            )
+
+        if 400 <= status < 500:
+            raise PermanentError(
+                f"HTTP {status} {url}"
+            )
+
+        if 500 <= status < 600:
+            raise TransientError(
+                f"HTTP {status} {url}"
+            )
 
     async def _fetch_response(
         self,
@@ -437,7 +465,7 @@ class AsyncCrawler:
             return []
 
         self._reset_crawl_state()
-        self._start_time = time.time()
+        self._start_time = time.monotonic()
 
         queue = CrawlerQueue()
         depths: dict[str, int] = {}
@@ -597,12 +625,6 @@ class AsyncCrawler:
 
         return base_delay
 
-    async def _wait_with_delay(self, crawl_delay: float) -> None:
-        delay = self._calculate_delay(crawl_delay)
-
-        if delay > 0:
-            await asyncio.sleep(delay)
-
     async def _check_robots(self, url: str, domain: str, base_url: str) -> float:
         if not self.respect_robots or self.robots_parser is None:
             return 0.0
@@ -674,21 +696,47 @@ class AsyncCrawler:
         return True
 
     def _record_request(self) -> None:
-        current_time = time.time()
+        current_time = time.monotonic()
+
         self._request_timestamps.append(current_time)
         self._total_requests += 1
 
         cutoff = current_time - 60.0
+
         self._request_timestamps = [
-            ts for ts in self._request_timestamps
-            if ts > cutoff
+            timestamp
+            for timestamp in self._request_timestamps
+            if timestamp > cutoff
         ]
 
     def get_current_rps(self) -> float:
         if not self._request_timestamps:
             return 0.0
 
-        return len(self._request_timestamps) / 60.0
+        now = time.monotonic()
+        cutoff = now - 60.0
+
+        self._request_timestamps = [
+            timestamp
+            for timestamp in self._request_timestamps
+            if timestamp > cutoff
+        ]
+
+        if not self._request_timestamps:
+            return 0.0
+
+        first_request_time = self._request_timestamps[0]
+        window_start = max(
+            first_request_time,
+            cutoff,
+        )
+
+        elapsed = now - window_start
+
+        if elapsed <= 0:
+            return 0.0
+
+        return len(self._request_timestamps) / elapsed
 
     def get_average_delay(self) -> float:
         if len(self._request_timestamps) < 2:
@@ -705,7 +753,7 @@ class AsyncCrawler:
         if self._start_time == 0.0:
             return 0.0
 
-        return time.time() - self._start_time
+        return time.monotonic() - self._start_time
 
     def _print_progress(self, queue: CrawlerQueue) -> None:
         stats = queue.get_stats()

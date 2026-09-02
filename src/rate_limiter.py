@@ -20,13 +20,24 @@ class RateLimiter:
         self.global_lock = asyncio.Lock()
         self.domain_locks: dict[str, asyncio.Lock] = {}
 
-    async def acquire(self, domain: str) -> None:
+    async def acquire(
+            self,
+            domain: str,
+            minimum_delay: float = 0.0,
+    ) -> None:
         if self.per_domain:
-            await self._handle_per_domain(domain)
+            await self._handle_per_domain(
+                domain,
+                minimum_delay
+            )
         else:
-            await self._handle_global()
+            await self._handle_global(minimum_delay)
 
-    async def _handle_per_domain(self, domain: str) -> None:
+    async def _handle_per_domain(
+            self,
+            domain: str,
+            minimum_delay: float,
+    ) -> None:
         lock = self.domain_locks.get(domain)
 
         if lock is None:
@@ -36,17 +47,40 @@ class RateLimiter:
         async with lock:
             last_time = self.requests_time.get(domain)
 
-            new_time = await self._apply_limit(last_time)
+            interval = max(
+                self.min_interval,
+                minimum_delay,
+            )
+
+            new_time = await self._apply_limit(
+                last_time,
+                interval
+            )
 
             self.requests_time[domain] = new_time
 
-    async def _handle_global(self) -> None:
+    async def _handle_global(
+            self,
+            minimum_delay: float,
+    ) -> None:
         async with self.global_lock:
-            new_time = await self._apply_limit(self.last_request_time)
+            interval = max(
+                self.min_interval,
+                minimum_delay,
+            )
+
+            new_time = await self._apply_limit(
+                self.last_request_time,
+                interval
+            )
 
             self.last_request_time = new_time
 
-    async def _apply_limit(self, last_time: float | None) -> float:
+    async def _apply_limit(
+            self,
+            last_time: float | None,
+            minimum_interval: float,
+    ) -> float:
         now = time.monotonic()
 
         if last_time is None:
@@ -54,10 +88,10 @@ class RateLimiter:
 
         elapsed = now - last_time
 
-        if elapsed < self.min_interval:
-            delay = self.min_interval - elapsed
-
-            await asyncio.sleep(delay)
+        if elapsed < minimum_interval:
+            await asyncio.sleep(
+                minimum_interval - elapsed,
+            )
 
             now = time.monotonic()
 
