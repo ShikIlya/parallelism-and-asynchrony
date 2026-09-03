@@ -32,6 +32,35 @@ class RobotsParser:
 
         return rules
 
+    def _get_agent_rules(
+        self,
+        rules: dict,
+        user_agent: str,
+    ) -> dict | None:
+        normalized_agent = user_agent.lower()
+
+        product_token = normalized_agent.split(
+            "/",
+            1,
+        )[0]
+
+        matching_agents = [
+            agent
+            for agent in rules
+            if agent != "*"
+            and product_token.startswith(agent)
+        ]
+
+        if matching_agents:
+            most_specific_agent = max(
+                matching_agents,
+                key=len,
+            )
+
+            return rules[most_specific_agent]
+
+        return rules.get("*")
+
     def can_fetch(self, url: str, user_agent: str = "*") -> bool:
         base_url = self._get_base_url(url)
         rules = self._cache.get(base_url)
@@ -39,8 +68,10 @@ class RobotsParser:
         if rules is None:
             return True
 
-        user_agent = user_agent.lower()
-        agent_rules = rules.get(user_agent) or rules.get("*")
+        agent_rules = self._get_agent_rules(
+            rules,
+            user_agent,
+        )
 
         if agent_rules is None:
             return True
@@ -54,17 +85,18 @@ class RobotsParser:
         return True
 
     def get_crawl_delay(self, user_agent: str = "*") -> float:
-        user_agent = user_agent.lower()
-
-        agent_rules = (
-                self._current_rules.get(user_agent)
-                or self._current_rules.get("*")
+        agent_rules = self._get_agent_rules(
+            self._current_rules,
+            user_agent,
         )
 
         if agent_rules is None:
             return 0.0
 
-        return agent_rules.get("crawl_delay", 0.0)
+        return agent_rules.get(
+            "crawl_delay",
+            0.0,
+        )
 
     def _get_base_url(self, url: str) -> str:
         parsed = urlparse(url)
