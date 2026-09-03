@@ -1103,17 +1103,25 @@ class TestCrawlerRateLimiting:
         await crawler.close()
 
 class TestCrawlerMonitoring:
-    @pytest.mark.asyncio
-    async def test_get_current_rps(self):
+    def test_get_current_rps(
+            self,
+            monkeypatch,
+    ):
         crawler = AsyncCrawler()
-        crawler._record_request()
-        await asyncio.sleep(0.01)
-        crawler._record_request()
-        crawler._record_request()
 
-        rps = crawler.get_current_rps()
+        crawler._request_timestamps = [
+            95.0,
+            97.0,
+            99.0,
+        ]
 
-        assert rps == 3.0 / 60.0
+        monkeypatch.setattr(
+            time,
+            "monotonic",
+            lambda: 100.0,
+        )
+
+        assert crawler.get_current_rps() == 3.0 / 5.0
 
     @pytest.mark.asyncio
     async def test_get_average_delay(self):
@@ -1127,14 +1135,30 @@ class TestCrawlerMonitoring:
     @pytest.mark.asyncio
     async def test_record_request_keeps_last_60_seconds(self):
         crawler = AsyncCrawler()
-        now = time.time()
-        old = [now - 70, now - 65]
-        new = [now - 10, now - 5, now]
+
+        now = time.monotonic()
+
+        old = [
+            now - 70,
+            now - 65,
+        ]
+
+        new = [
+            now - 10,
+            now - 5,
+            now,
+        ]
+
         crawler._request_timestamps = old + new
+
         crawler._record_request()
 
-        for ts in crawler._request_timestamps:
-            assert ts > now - 60
+        cutoff = time.monotonic() - 60.0
+
+        assert all(
+            timestamp > cutoff
+            for timestamp in crawler._request_timestamps
+        )
 
         assert len(crawler._request_timestamps) == 4
 
@@ -1156,7 +1180,10 @@ class TestRateLimiterIntegration:
 
         crawler.robots_parser = None
         await crawler.fetch_url("https://example.com")
-        mock_limiter.acquire.assert_called_once_with("example.com")
+        mock_limiter.acquire.assert_called_once_with(
+            "example.com",
+            minimum_delay=0.0,
+        )
         await crawler.close()
 
 # --------------------------------------------------------------------------
@@ -1448,7 +1475,7 @@ async def test_save_to_postgresql(
     assert len(pages) == 1
     assert pages[0]["url"] == sample_page["url"]
     assert pages[0]["title"] == sample_page["title"]
-    assert pages[0]["text_content"] == sample_page["text"]
+    assert pages[0]["text"] == sample_page["text"]
     assert pages[0]["status_code"] == sample_page["status_code"]
     assert pages[0]["content_type"] == sample_page["content_type"]
 
@@ -1527,7 +1554,7 @@ async def test_data_integrity_in_all_storages(
 
     assert postgres_page["url"] == sample_page["url"]
     assert postgres_page["title"] == sample_page["title"]
-    assert postgres_page["text_content"] == sample_page["text"]
+    assert postgres_page["text"] == sample_page["text"]
     assert postgres_page["links"] == sample_page["links"]
     assert postgres_page["metadata"] == sample_page["metadata"]
     assert postgres_page["status_code"] == sample_page["status_code"]
