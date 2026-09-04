@@ -22,10 +22,15 @@ class RateLimiter:
 
     async def acquire(
             self,
-            domain: str,
+            domain: str | None = None,
             minimum_delay: float = 0.0,
     ) -> None:
         if self.per_domain:
+            if domain is None:
+                raise ValueError(
+                    "domain is required when per_domain=True"
+                )
+
             await self._handle_per_domain(
                 domain,
                 minimum_delay
