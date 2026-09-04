@@ -622,7 +622,6 @@ async def demo_day6_storage() -> None:
 
     json_storage = JSONStorage(
         filename=str(DAY6_JSON_FILE),
-        indent=None,
     )
 
     csv_storage = CSVStorage(

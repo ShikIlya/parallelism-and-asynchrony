@@ -12,7 +12,7 @@ class JSONStorage(DataStorage):
         self,
         filename: str,
         encoding: str = "utf-8",
-        indent: int | None = None,
+        indent: int | None = 2,
         max_retries: int = 3,
         backoff_factor: float = 0.5,
     ):
@@ -32,20 +32,26 @@ class JSONStorage(DataStorage):
                     exist_ok=True,
                 )
 
+                document = await self._load_document_unlocked()
+
+                document["results"].append(
+                    data
+                )
+
                 serialized_data = json.dumps(
-                    data,
+                    document,
                     ensure_ascii=False,
                     indent=self.indent,
                     default=str,
                 )
 
                 async with aiofiles.open(
-                        self.path,
-                        mode="a",
-                        encoding=self.encoding,
+                    self.path,
+                    mode="w",
+                    encoding=self.encoding,
                 ) as file:
                     await file.write(
-                        serialized_data + "\n"
+                        serialized_data
                     )
 
         await run_with_retry(
@@ -57,29 +63,43 @@ class JSONStorage(DataStorage):
 
     async def load_all(self) -> list[dict]:
         async with self._lock:
-            if not self.path.exists():
-                return []
+            document = await self._load_document_unlocked()
 
-            async with aiofiles.open(
-                    self.path,
-                    mode="r",
-                    encoding=self.encoding,
-            ) as file:
-                content = await file.read()
+        return document["results"]
 
-        pages = []
+    async def _load_document_unlocked(self) -> dict:
+        if not self.path.exists():
+            return {
+                "results": [],
+            }
 
-        for line in content.splitlines():
-            line = line.strip()
+        async with aiofiles.open(
+            self.path,
+            mode="r",
+            encoding=self.encoding,
+        ) as file:
+            content = await file.read()
 
-            if not line:
-                continue
+        if not content.strip():
+            return {
+                "results": [],
+            }
 
-            pages.append(
-                json.loads(line)
+        document = json.loads(content)
+
+        if not isinstance(document, dict):
+            raise ValueError(
+                "JSONStorage expects an object at the file root"
             )
 
-        return pages
+        results = document.get("results")
+
+        if not isinstance(results, list):
+            raise ValueError(
+                "JSONStorage expects a list in the 'results' field"
+            )
+
+        return document
 
     async def close(self) -> None:
         return None
