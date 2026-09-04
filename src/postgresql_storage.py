@@ -54,6 +54,10 @@ class PostgreSQLStorage(DataStorage):
                 """
             )
 
+            await self._migrate_text_column(
+                connection,
+            )
+
             await connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_pages_url
@@ -72,6 +76,35 @@ class PostgreSQLStorage(DataStorage):
                 """
                 CREATE INDEX IF NOT EXISTS idx_pages_status_code
                 ON pages (status_code);
+                """
+            )
+
+    async def _migrate_text_column(
+        self,
+        connection: asyncpg.Connection,
+    ) -> None:
+        columns = await connection.fetch(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'pages';
+            """
+        )
+
+        column_names = {
+            row["column_name"]
+            for row in columns
+        }
+
+        has_old_column = "text_content" in column_names
+        has_new_column = "text" in column_names
+
+        if has_old_column and not has_new_column:
+            await connection.execute(
+                """
+                ALTER TABLE pages
+                RENAME COLUMN text_content TO text;
                 """
             )
 
