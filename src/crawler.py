@@ -224,7 +224,26 @@ class AsyncCrawler:
                     url,
                 )
 
-                html = await response.text()
+                if content_type not in {
+                    "text/html",
+                    "application/xhtml+xml",
+                }:
+                    logger.info(
+                        "Пропущен не-HTML ресурс: %s, тип: %s",
+                        url,
+                        content_type,
+                    )
+
+                    return {
+                        "html": "",
+                        "status_code": status,
+                        "content_type": content_type,
+                        "error": "unsupported_content_type",
+                    }
+
+                html = await response.text(
+                    errors="replace",
+                )
 
                 logger.info(
                     "Успешно загружено: %s, статус: %s",
@@ -586,7 +605,11 @@ class AsyncCrawler:
                                 origin_domains.setdefault(link, origin_domain)
                                 queue.add_url(link)
 
-                    self._print_progress(queue)
+                    self._print_progress(
+                        queue=queue,
+                        max_pages=max_pages,
+                        active_tasks=len(in_flight),
+                    )
 
         return list(self.processed_urls.values())
 
@@ -772,21 +795,47 @@ class AsyncCrawler:
 
         return time.monotonic() - self._start_time
 
-    def _print_progress(self, queue: CrawlerQueue) -> None:
+    def _print_progress(
+            self,
+            queue: CrawlerQueue,
+            max_pages: int,
+            active_tasks: int,
+    ) -> None:
         stats = queue.get_stats()
-        done = len(self.processed_urls)
+
+        successful = len(self.processed_urls)
+        failed = len(self.failed_urls)
+        completed = successful + failed
 
         current_rps = self.get_current_rps()
         avg_delay = self.get_average_delay()
         elapsed = self.get_elapsed_time()
 
+        progress_percent = (
+            completed / max_pages * 100
+            if max_pages > 0
+            else 0.0
+        )
+
+        remaining_pages = max(max_pages - completed, 0)
+
+        if current_rps > 0:
+            eta_seconds = remaining_pages / current_rps
+            eta_text = f"{eta_seconds:.1f}с"
+        else:
+            eta_text = "—"
+
         print(
-            f"\r📄 Обработано: {done} | "
+            f"\r📄 Обработано: {completed}/{max_pages} "
+            f"({progress_percent:.1f}%) | "
+            f"✅ Успешно: {successful} | "
+            f"❌ Ошибок: {failed} | "
             f"⏳ В очереди: {stats['count_queue']} | "
-            f"❌ Ошибок: {len(self.failed_urls)} | "
+            f"🔄 Активно: {active_tasks} | "
             f"🚫 Robots: {len(self.blocked_urls)} | "
             f"⚡ RPS: {current_rps:.2f} | "
             f"⏱ Задержка: {avg_delay:.2f}с | "
+            f"⌛ ETA: {eta_text} | "
             f"⏰ Время: {elapsed:.1f}с",
             end="",
             flush=True,

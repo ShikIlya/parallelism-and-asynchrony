@@ -9,12 +9,48 @@ import time
 import json
 import asyncio
 import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
+import argparse
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+LOG_DIR = Path("logs")
+LOG_FILE = LOG_DIR / "crawler.log"
+
+def setup_logging() -> None:
+    LOG_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    log_format = (
+        "%(asctime)s | %(levelname)-8s | "
+        "%(name)s | %(message)s"
+    )
+
+    formatter = logging.Formatter(
+        log_format,
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+
+    file_handler = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=1_000_000,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+
+    root_logger.handlers.clear()
+    root_logger.addHandler(console_handler)
+    root_logger.addHandler(file_handler)
 
 logger = logging.getLogger(__name__)
 
@@ -761,22 +797,159 @@ async def demo_day6_storage() -> None:
     finally:
         await crawler.close()
 
-async def demo_day7_sitemap() -> None:
-    crawler = AdvancedCrawler.from_config("config.json")
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Асинхронный веб-краулер",
+    )
+
+    parser.add_argument(
+        "--urls",
+        nargs="+",
+        help="Стартовые URL",
+    )
+
+    parser.add_argument(
+        "--max-pages",
+        type=int,
+        help="Максимальное количество страниц",
+    )
+
+    parser.add_argument(
+        "--max-depth",
+        type=int,
+        help="Максимальная глубина обхода",
+    )
+
+    parser.add_argument(
+        "--output",
+        help="JSON-файл со статистикой",
+    )
+
+    parser.add_argument(
+        "--config",
+        default="config.json",
+        help="Путь к JSON-конфигурации",
+    )
+
+    parser.add_argument(
+        "--respect-robots",
+        action="store_true",
+        help="Соблюдать robots.txt",
+    )
+
+    parser.add_argument(
+        "--rate-limit",
+        type=float,
+        help="Лимит запросов в секунду",
+    )
+
+    return parser.parse_args()
+
+async def demo_day7_sitemap(
+    args: argparse.Namespace,
+) -> None:
+    logger.info(
+        "Запуск crawler: config=%s, urls=%s",
+        args.config,
+        args.urls,
+    )
+
+    crawler = AdvancedCrawler.from_config(
+        args.config,
+    )
+
+    if args.urls is not None:
+        crawler.start_urls = args.urls
+        crawler.sitemap_urls = []
+        logger.info(
+            "Стартовые URL заданы через CLI: %s",
+            args.urls,
+        )
+
+    if args.max_pages is not None:
+        crawler.max_pages = args.max_pages
+        logger.info(
+            "Лимит страниц задан через CLI: %s",
+            args.max_pages,
+        )
+
+    if args.max_depth is not None:
+        crawler.max_depth = args.max_depth
+        logger.info(
+            "Максимальная глубина задана через CLI: %s",
+            args.max_depth,
+        )
+
+    if args.respect_robots:
+        crawler.respect_robots = True
+        logger.info("Проверка robots.txt включена через CLI")
+
+    if args.rate_limit is not None:
+        crawler.rate_limiter.requests_per_second = (
+            args.rate_limit
+        )
+        logger.info(
+            "Лимит скорости задан через CLI: %s req/s",
+            args.rate_limit,
+        )
 
     try:
+        logger.info("Начинаем обход страниц")
+
         await crawler.crawl()
 
+        print()
+
         stats = crawler.get_stats()
+
+        logger.info(
+            "Обход завершён: total=%s, successful=%s, failed=%s",
+            stats["total_pages"],
+            stats["successful"],
+            stats["failed"],
+        )
 
         print(f"Обработано: {stats['total_pages']} страниц")
         print(f"Успешно: {stats['successful']}")
         print(f"Ошибок: {stats['failed']}")
 
-        crawler.export_to_json("output/day7_stats.json")
-        crawler.export_to_html_report("output/day7_report.html")
+        output_filename = (
+            args.output
+            if args.output is not None
+            else "output/day7_stats.json"
+        )
+
+        output_path = Path(output_filename)
+        output_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        html_report_path = Path("output/day7_report.html")
+        html_report_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        crawler.export_to_json(str(output_path))
+        crawler.export_to_html_report(str(html_report_path))
+
+        logger.info(
+            "Файлы отчётов сохранены: json=%s, html=%s",
+            output_path,
+            html_report_path,
+        )
+
+        print(f"JSON-статистика: {output_path}")
+        print(f"HTML-отчёт: {html_report_path}")
+
+    except Exception:
+        logger.exception("Критическая ошибка во время обхода")
+        raise
+
     finally:
         await crawler.close()
+        logger.info("HTTP-сессия crawler закрыта")
 
 async def main() -> None:
     # await demo_day1_loading()
@@ -785,7 +958,12 @@ async def main() -> None:
     # await demo_day4_monitoring()
     # await demo_day5_retry_and_errors()
     # await demo_day6_storage()
-    await demo_day7_sitemap()
+
+    setup_logging()
+
+    args = parse_args()
+
+    await demo_day7_sitemap(args)
 
 if __name__ == "__main__":
     asyncio.run(main())
