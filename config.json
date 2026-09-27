@@ -1,0 +1,44 @@
+{
+  "crawler": {
+    "max_concurrent": 3,
+    "max_depth": 0,
+    "max_per_domain": 2,
+    "requests_per_second": 1.0,
+    "rate_limit_per_domain": true,
+    "respect_robots": false,
+    "user_agent": "AdvancedCrawler/1.0",
+    "min_delay": 0.0,
+    "jitter": 0.0,
+    "max_retries": 2,
+    "backoff_factor": 0.5,
+    "total_timeout": 30.0,
+    "connect_timeout": 10.0,
+    "read_timeout": 20.0,
+    "timeout_backoff_factor": 1.5,
+    "max_timeout": 120.0
+  },
+  "crawl": {
+    "start_urls": [],
+    "sitemap_urls": [
+      "https://www.sitemaps.org/sitemap.xml"
+    ],
+    "max_pages": 5,
+    "same_domain_only": true,
+    "include_patterns": null,
+    "exclude_patterns": null
+  },
+  "storage": {
+    "json": {
+      "filename": "output/day7_pages.json"
+    },
+    "csv": {
+      "filename": "output/day7_pages.csv"
+    },
+    "postgresql": {
+      "database": "crawler_db",
+      "user": "ilyashik",
+      "host": "localhost",
+      "port": 5432
+    }
+  }
+}

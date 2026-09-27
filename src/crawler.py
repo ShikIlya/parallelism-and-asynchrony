@@ -5,6 +5,8 @@ from urllib.parse import urlparse, urlunparse
 import random
 import time
 from datetime import datetime, timezone
+import json
+from pathlib import Path
 
 from html_parser import HTMLParser
 from crawler_queue import CrawlerQueue
@@ -14,6 +16,12 @@ from robots_parser import RobotsParser
 from retry_strategy import RetryStrategy
 from exceptions import TransientError, PermanentError, NetworkError, ParseError
 from data_storage import DataStorage
+from json_storage import JSONStorage
+from csv_storage import CSVStorage
+from postgresql_storage import PostgreSQLStorage
+from multi_storage import MultiStorage
+from crawler_stats import CrawlerStats
+from sitemap_parser import SitemapParser
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +125,7 @@ class AsyncCrawler:
         self._request_timestamps: list[float] = []
         self._start_time: float = 0.0
         self._total_requests: int = 0
+        self.status_codes: dict[int, int] = {}
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
@@ -207,6 +216,8 @@ class AsyncCrawler:
             ) as response:
                 status = response.status
                 content_type = response.content_type
+
+                self._record_status_code(status)
 
                 self._raise_for_http_status(
                     status,
@@ -658,6 +669,7 @@ class AsyncCrawler:
         self.blocked_urls.clear()
         self.permanent_error_urls.clear()
         self.errors_by_type.clear()
+        self.status_codes.clear()
         self.retry_strategy.reset_statistics()
 
         self._request_timestamps = []
@@ -694,6 +706,11 @@ class AsyncCrawler:
             return False
 
         return True
+
+    def _record_status_code(self, status: int) -> None:
+        self.status_codes[status] = (
+                self.status_codes.get(status, 0) + 1
+        )
 
     def _record_request(self) -> None:
         current_time = time.monotonic()
@@ -794,3 +811,204 @@ class AsyncCrawler:
             "permanent_error_urls": sorted(self.permanent_error_urls),
             "failed_urls": dict(self.failed_urls),
         }
+
+
+class AdvancedCrawler(AsyncCrawler):
+    @classmethod
+    def from_config(
+            cls,
+            filename: str,
+    ) -> "AdvancedCrawler":
+        path = Path(filename)
+
+        config = json.loads(
+            path.read_text(
+                encoding="utf-8",
+            )
+        )
+
+        crawler_config = config["crawler"]
+        crawl_config = config["crawl"]
+
+        storage_config = config.get("storage", {})
+        storages: list[DataStorage] = []
+
+        json_config = storage_config.get("json")
+
+        if json_config is not None:
+            storages.append(
+                JSONStorage(
+                    filename=json_config["filename"],
+                )
+            )
+
+        csv_config = storage_config.get("csv")
+
+        if csv_config is not None:
+            storages.append(
+                CSVStorage(
+                    filename=csv_config["filename"],
+                )
+            )
+
+        postgresql_config = storage_config.get("postgresql")
+
+        if postgresql_config is not None:
+            storages.append(
+                PostgreSQLStorage(
+                    database=postgresql_config["database"],
+                    user=postgresql_config["user"],
+                    host=postgresql_config["host"],
+                    port=postgresql_config["port"],
+                )
+            )
+
+        storage = MultiStorage(storages) if storages else None
+
+        crawler = cls(
+            max_concurrent=crawler_config["max_concurrent"],
+            max_depth=crawler_config["max_depth"],
+            max_per_domain=crawler_config["max_per_domain"],
+            requests_per_second=crawler_config[
+                "requests_per_second"
+            ],
+            rate_limit_per_domain=crawler_config[
+                "rate_limit_per_domain"
+            ],
+            respect_robots=crawler_config["respect_robots"],
+            user_agent=crawler_config["user_agent"],
+            min_delay=crawler_config["min_delay"],
+            jitter=crawler_config["jitter"],
+            max_retries=crawler_config["max_retries"],
+            backoff_factor=crawler_config["backoff_factor"],
+            total_timeout=crawler_config["total_timeout"],
+            connect_timeout=crawler_config["connect_timeout"],
+            read_timeout=crawler_config["read_timeout"],
+            timeout_backoff_factor=crawler_config[
+                "timeout_backoff_factor"
+            ],
+            max_timeout=crawler_config["max_timeout"],
+            storage=storage,
+        )
+
+        crawler.start_urls = crawl_config["start_urls"]
+        crawler.sitemap_urls = crawl_config["sitemap_urls"]
+        crawler.max_pages = crawl_config["max_pages"]
+        crawler.same_domain_only = crawl_config["same_domain_only"]
+        crawler.include_patterns = crawl_config["include_patterns"]
+        crawler.exclude_patterns = crawl_config["exclude_patterns"]
+
+        return crawler
+
+    async def crawl(self) -> list[dict]:
+        start_urls = list(self.start_urls)
+
+        if self.sitemap_urls:
+            session = await self._get_session()
+            sitemap_parser = SitemapParser(session)
+
+            for sitemap_url in self.sitemap_urls:
+                sitemap_urls = await sitemap_parser.fetch_sitemap(
+                    sitemap_url
+                )
+
+                start_urls.extend(sitemap_urls)
+
+        return await super().crawl(
+            start_urls=start_urls,
+            max_pages=self.max_pages,
+            same_domain_only=self.same_domain_only,
+            exclude_patterns=self.exclude_patterns,
+            include_patterns=self.include_patterns,
+        )
+
+    def get_stats(self) -> dict:
+        stats = CrawlerStats(self)
+
+        return stats.get_stats()
+
+    def export_to_json(self, filename: str) -> None:
+        stats = self.get_stats()
+        path = Path(filename)
+
+        path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        path.write_text(
+            json.dumps(
+                stats,
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            ),
+            encoding="utf-8",
+        )
+
+    def export_to_html_report(self, filename: str) -> None:
+        stats = self.get_stats()
+        path = Path(filename)
+
+        path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        html = f"""
+        <!DOCTYPE html>
+        <html lang="ru">
+        <head>
+          <meta charset="UTF-8">
+          <title>Отчёт краулера</title>
+        </head>
+        <body>
+          <h1>Отчёт краулера</h1>
+
+          <table border="1">
+              <tr>
+                <th>Показатель</th>
+                <th>Значение</th>
+              </tr>
+              <tr>
+                <td>Всего обработано</td>
+                <td>{stats["total_pages"]}</td>
+              </tr>
+              <tr>
+                <td>Успешно</td>
+                <td>{stats["successful"]}</td>
+              </tr>
+              <tr>
+                <td>Ошибок</td>
+                <td>{stats["failed"]}</td>
+              </tr>
+              <tr>
+                <td>HTTP-попыток</td>
+                <td>{stats["total_requests"]}</td>
+              </tr>
+              <tr>
+                <td>Средняя скорость</td>
+                <td>{stats["average_pages_per_second"]:.2f} стр./сек.</td>
+              </tr>
+              <tr>
+                <td>Время работы</td>
+                <td>{stats["elapsed_seconds"]:.2f} сек.</td>
+              </tr>
+          </table>
+
+          <h2>Статусы HTTP</h2>
+          <pre>{stats["status_codes"]}</pre>
+
+          <h2>Топ доменов</h2>
+          <pre>{stats["top_domains"]}</pre>
+
+          <h2>Ошибки по типам</h2>
+          <pre>{stats["errors_by_type"]}</pre>
+        </body>
+        </html>
+        """
+
+        path.write_text(
+            html,
+            encoding="utf-8",
+        )

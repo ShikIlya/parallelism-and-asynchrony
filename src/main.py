@@ -1,4 +1,4 @@
-from crawler import AsyncCrawler
+from crawler import AsyncCrawler, AdvancedCrawler
 from exceptions import TransientError, NetworkError
 from postgresql_storage import PostgreSQLStorage
 from csv_storage import CSVStorage
@@ -761,13 +761,31 @@ async def demo_day6_storage() -> None:
     finally:
         await crawler.close()
 
+async def demo_day7_sitemap() -> None:
+    crawler = AdvancedCrawler.from_config("config.json")
+
+    try:
+        await crawler.crawl()
+
+        stats = crawler.get_stats()
+
+        print(f"Обработано: {stats['total_pages']} страниц")
+        print(f"Успешно: {stats['successful']}")
+        print(f"Ошибок: {stats['failed']}")
+
+        crawler.export_to_json("output/day7_stats.json")
+        crawler.export_to_html_report("output/day7_report.html")
+    finally:
+        await crawler.close()
+
 async def main() -> None:
-    await demo_day1_loading()
-    await demo_day2_parsing()
-    await demo_day3_crawling()
-    await demo_day4_monitoring()
-    await demo_day5_retry_and_errors()
-    await demo_day6_storage()
+    # await demo_day1_loading()
+    # await demo_day2_parsing()
+    # await demo_day3_crawling()
+    # await demo_day4_monitoring()
+    # await demo_day5_retry_and_errors()
+    # await demo_day6_storage()
+    await demo_day7_sitemap()
 
 if __name__ == "__main__":
     asyncio.run(main())
