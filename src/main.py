@@ -952,12 +952,12 @@ async def demo_day7_sitemap(
         logger.info("HTTP-сессия crawler закрыта")
 
 async def main() -> None:
-    # await demo_day1_loading()
-    # await demo_day2_parsing()
-    # await demo_day3_crawling()
-    # await demo_day4_monitoring()
-    # await demo_day5_retry_and_errors()
-    # await demo_day6_storage()
+    await demo_day1_loading()
+    await demo_day2_parsing()
+    await demo_day3_crawling()
+    await demo_day4_monitoring()
+    await demo_day5_retry_and_errors()
+    await demo_day6_storage()
 
     setup_logging()
 
