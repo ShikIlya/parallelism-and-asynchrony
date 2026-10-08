@@ -9,7 +9,7 @@
 - Асинхронная загрузка страниц через `aiohttp`
 - Ограничение общего числа одновременных задач
 - Ограничение одновременных запросов на домен
-- Rate limiting: ограничение запросов в секунду
+- Rate limiting с изменением лимита через CLI
 - Поддержка `robots.txt` и `crawl-delay`
 - Обход ссылок до указанной глубины
 - Фильтрация ссылок по домену, include/exclude patterns
@@ -18,8 +18,8 @@
 - Парсинг HTML: текст, заголовок, ссылки, изображения, таблицы и списки
 - Сохранение данных в JSON, CSV и PostgreSQL
 - `MultiStorage` для записи в несколько хранилищ
-- Sitemap-поддержка
-- CLI-интерфейс на основе `argparse`
+- Sitemap-поддержка, включая вложенные sitemap
+- CLI-интерфейс на основе `argparse` с подкомандами
 - Логирование в консоль и файл с ротацией
 - Мониторинг прогресса, RPS, ETA, очереди и активных задач
 - JSON-статистика и HTML-отчёт
@@ -28,16 +28,12 @@
 ## Структура проекта
 
 ```text
-parallelism-and-asynchrony/
+parallelism/
 ├── config.json
 ├── requirements.txt
 ├── README.md
 ├── logs/
-│   └── crawler.log
 ├── output/
-│   ├── day7_report.html
-│   ├── day7_stats.json
-│   └── performance_report.json
 └── src/
     ├── crawler.py
     ├── crawler_queue.py
@@ -66,35 +62,59 @@ parallelism-and-asynchrony/
 ### Требования
 
 - Python 3.10+
-- `pip`
-- PostgreSQL — только если в `config.json` включено `PostgreSQLStorage`
+- виртуальное окружение Python рекомендуется
+- PostgreSQL — только если в `config.json` включён `PostgreSQLStorage`
 
-Все Python-зависимости проекта перечислены в файле `requirements.txt`.
+Все внешние зависимости проекта перечислены в `requirements.txt`.
 
-Из корневой папки проекта установи их командой:
+Создание виртуального окружения:
 
 ```bash
-pip install -r requirements.txt
+python -m venv venv
 ```
 
-При использовании виртуального окружения сначала активируй его, затем выполни ту же команду:
+Активация в Windows PowerShell:
+
+```powershell
+.\venv\Scripts\Activate.ps1
+```
+
+Активация в Linux/macOS:
 
 ```bash
-pip install -r requirements.txt
+source venv/bin/activate
+```
+
+Установка всех зависимостей из корня проекта:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+Проверка драйвера PostgreSQL:
+
+```bash
+python -m pip show asyncpg
 ```
 
 ## Быстрый запуск
 
-Запуск crawler с настройками из `config.json`:
+Основной режим запуска — команда `crawl`:
 
 ```bash
-python src/main.py
+python src/main.py crawl
 ```
 
 Запуск с одним URL и ограничением в одну страницу:
 
 ```bash
-python src/main.py \
+python src/main.py crawl --urls https://example.com --max-pages 1 --max-depth 0 --output output/results.json --rate-limit 1
+```
+
+Для Linux/macOS можно использовать переносы строк:
+
+```bash
+python src/main.py crawl \
   --urls https://example.com \
   --max-pages 1 \
   --max-depth 0 \
@@ -102,25 +122,64 @@ python src/main.py \
   --rate-limit 1
 ```
 
+Для Windows PowerShell:
+
+```powershell
+python src/main.py crawl --urls https://example.com --max-pages 1 --max-depth 0 --output output/results.json --rate-limit 1
+```
+
 Пример обхода нескольких страниц:
 
 ```bash
-python src/main.py \
-  --urls https://httpbingo.org \
-  --max-pages 10 \
-  --max-depth 1 \
-  --output output/httpbingo_results.json \
-  --respect-robots \
-  --rate-limit 2
+python src/main.py crawl --urls https://httpbingo.org --max-pages 10 --max-depth 1 --output output/httpbingo_results.json --respect-robots --rate-limit 2
 ```
 
-Справка по аргументам:
+Справка по всем командам:
 
 ```bash
 python src/main.py --help
 ```
 
+Справка по основному crawler-режиму:
+
+```bash
+python src/main.py crawl --help
+```
+
+## Команды
+
+CLI разделён на подкоманды. Поэтому `--help` не запускает сетевые демонстрации, а дни 1–6 выполняются только по явной команде.
+
+| Команда | Назначение |
+|---|---|
+| `crawl` | Запуск полноценного `AdvancedCrawler` |
+| `day1` | Сравнение последовательной и параллельной загрузки |
+| `day2` | Парсинг HTML |
+| `day3` | Управление конкурентностью и очередями |
+| `day4` | Мониторинг скорости и прогресса |
+| `day5` | Retry, exponential backoff и обработка ошибок |
+| `day6` | Сохранение данных в JSON, CSV и PostgreSQL |
+
+Примеры:
+
+```bash
+python src/main.py day1
+python src/main.py day2
+python src/main.py day3
+python src/main.py day4
+python src/main.py day5
+python src/main.py day6
+```
+
+Команды `day1`–`day6` не запускаются автоматически при вызове `crawl` или `--help`.
+
 ## CLI-параметры
+
+Параметры crawler-а передаются после подкоманды `crawl`:
+
+```bash
+python src/main.py crawl [параметры]
+```
 
 | Аргумент | Описание |
 |---|---|
@@ -128,11 +187,18 @@ python src/main.py --help
 | `--max-pages N` | Максимальное число обрабатываемых страниц |
 | `--max-depth N` | Максимальная глубина обхода |
 | `--output PATH` | Путь к JSON-файлу итоговой статистики |
-| `--config PATH` | Путь к файлу конфигурации; по умолчанию `config.json` |
+| `--config PATH` | Путь к JSON-конфигурации; по умолчанию `config.json` |
 | `--respect-robots` | Включить соблюдение правил `robots.txt` |
 | `--rate-limit N` | Лимит запросов в секунду |
 
 CLI-параметры имеют приоритет над соответствующими значениями из `config.json`.
+
+`--rate-limit` изменяет фактическую задержку между запросами. Например:
+
+```text
+--rate-limit 4
+min_interval = 1 / 4 = 0.25 секунды
+```
 
 ## Конфигурация
 
@@ -165,9 +231,7 @@ crawler = AdvancedCrawler.from_config("config.json")
     "max_timeout": 120.0
   },
   "crawl": {
-    "start_urls": [
-      "https://example.com"
-    ],
+    "start_urls": ["https://example.com"],
     "sitemap_urls": [],
     "max_pages": 10,
     "same_domain_only": true,
@@ -175,12 +239,8 @@ crawler = AdvancedCrawler.from_config("config.json")
     "exclude_patterns": []
   },
   "storage": {
-    "json": {
-      "filename": "output/pages.json"
-    },
-    "csv": {
-      "filename": "output/pages.csv"
-    }
+    "json": {"filename": "output/pages.json"},
+    "csv": {"filename": "output/pages.csv"}
   }
 }
 ```
@@ -202,44 +262,37 @@ crawler = AdvancedCrawler.from_config("config.json")
 | `crawl` | `include_patterns` | Разрешённые подстроки URL |
 | `crawl` | `exclude_patterns` | Исключённые подстроки URL |
 
-## Использование API
+### Обработка sitemap
 
-Минимальный пример:
+Sitemap и вложенные sitemap загружаются через общий pipeline crawler-а. Поэтому такие запросы используют rate limiting, retry, timeout, robots.txt, логирование и общую HTTP-статистику.
+
+Если один sitemap недоступен, ошибка записывается в лог, а обработка остальных sitemap может продолжиться.
+
+## Использование API
 
 ```python
 import asyncio
 import sys
 from pathlib import Path
 
-sys.path.append(
-    str(Path(__file__).parent / "src")
-)
+sys.path.append(str(Path(__file__).parent / "src"))
 
 from crawler import AdvancedCrawler
 
 
 async def main() -> None:
-    crawler = AdvancedCrawler.from_config(
-        "config.json",
-    )
+    crawler = AdvancedCrawler.from_config("config.json")
 
     try:
         await crawler.crawl()
-
         stats = crawler.get_stats()
 
-        print(
-            f"Обработано: {stats['total_pages']} страниц"
-        )
+        print(f"Обработано: {stats['total_pages']} страниц")
         print(f"Успешно: {stats['successful']}")
         print(f"Ошибок: {stats['failed']}")
 
-        crawler.export_to_json(
-            "output/api_stats.json",
-        )
-        crawler.export_to_html_report(
-            "output/api_report.html",
-        )
+        crawler.export_to_json("output/api_stats.json")
+        crawler.export_to_html_report("output/api_report.html")
     finally:
         await crawler.close()
 
@@ -252,10 +305,11 @@ asyncio.run(main())
 | Метод | Назначение |
 |---|---|
 | `AdvancedCrawler.from_config(filename)` | Создаёт crawler и загружает JSON-конфигурацию |
-| `await crawler.crawl()` | Запускает обход start URLs и sitemap |
+| `await crawler.crawl()` | Запускает обход стартовых URL и sitemap |
 | `crawler.get_stats()` | Возвращает итоговую статистику |
 | `crawler.export_to_json(filename)` | Экспортирует статистику в JSON |
 | `crawler.export_to_html_report(filename)` | Создаёт HTML-отчёт |
+| `crawler.rate_limiter.set_requests_per_second(value)` | Изменяет лимит и пересчитывает интервал запросов |
 | `await crawler.close()` | Закрывает HTTP-сессию и подключённые хранилища |
 
 ## Мониторинг
@@ -268,32 +322,13 @@ asyncio.run(main())
 ⏱ Задержка: 1.00с | ⌛ ETA: 73.9с | ⏰ Время: 26.3с
 ```
 
-Показатели:
-
-- `Обработано` — завершённые URL и процент от `max_pages`
-- `Успешно` — успешно загруженные и распарсенные страницы
-- `Ошибок` — URL с постоянной или исчерпавшей retry ошибкой
-- `В очереди` — URL, ожидающие обработки
-- `Активно` — незавершённые асинхронные задачи
-- `RPS` — текущая скорость HTTP-запросов
-- `ETA` — оценка времени до достижения лимита страниц
-- `Время` — время работы crawler
-
 ## Логирование
 
-Логирование настраивается в `src/main.py`.
-
-- Консоль: сообщения уровня `INFO` и выше
+- Консоль: `INFO` и выше
 - Файл: `logs/crawler.log`
-- Уровень файла: `DEBUG` и выше
+- Файл: `DEBUG` и выше
 - Ротация: 1 MB на файл, до 3 резервных файлов
-- Формат: дата, время, уровень, имя logger-а, сообщение
-
-Пример записи:
-
-```text
-2026-09-27 16:34:12 | INFO     | crawler | Успешно загружено: https://example.com, статус: 200
-```
+- Формат: дата, время, уровень, имя logger-а и сообщение
 
 ## Производительность
 
@@ -309,13 +344,18 @@ python src/performance_test.py
 output/performance_report.json
 ```
 
+Тест сравнивает синхронную и асинхронную загрузку, измеряет время и память, а также запускает `AdvancedCrawler` с лимитами 100, 500 и 1000 страниц.
+
 ## Выходные файлы
 
 | Файл | Содержимое |
 |---|---|
-| `logs/crawler.log` | Основной лог crawler-а |
-| `output/day7_stats.json` | Итоговая статистика по умолчанию |
-| `output/day7_report.html` | HTML-отчёт по умолчанию |
+| `logs/crawler.log` | Основной лог crawler-а с ротацией |
+| `output/day7_stats.json` | Итоговая статистика основного crawl-режима |
+| `output/day7_report.html` | HTML-отчёт основного crawl-режима |
 | `output/performance_report.json` | Результаты benchmark |
-| `output/pages.json` | Данные страниц при JSON storage |
-| `output/pages.csv` | Данные страниц при CSV storage |
+| `output/day3_crawl_results.json` | Результаты демонстрации дня 3 |
+| `output/day5_retry_report.json` | Отчёт по retry и ошибкам |
+| `output/day6_pages.json` | Данные страниц в JSON |
+| `output/day6_pages.csv` | Данные страниц в CSV |
+| `output/day6_report.json` | Сводный отчёт дня 6 |

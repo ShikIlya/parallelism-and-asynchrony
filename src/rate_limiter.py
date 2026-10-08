@@ -101,3 +101,15 @@ class RateLimiter:
             now = time.monotonic()
 
         return now
+
+    def set_requests_per_second(
+            self,
+            requests_per_second: float,
+    ) -> None:
+        if requests_per_second <= 0:
+            raise ValueError(
+                "requests_per_second must be positive"
+            )
+
+        self.requests_per_second = requests_per_second
+        self.min_interval = 1.0 / requests_per_second

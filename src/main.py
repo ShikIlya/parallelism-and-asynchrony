@@ -802,45 +802,86 @@ def parse_args() -> argparse.Namespace:
         description="Асинхронный веб-краулер",
     )
 
-    parser.add_argument(
+    subparsers = parser.add_subparsers(
+        dest="command",
+        title="команды",
+        required=True,
+    )
+
+    crawl_parser = subparsers.add_parser(
+        "crawl",
+        help="Запустить полноценный AdvancedCrawler",
+    )
+
+    crawl_parser.add_argument(
         "--urls",
         nargs="+",
         help="Стартовые URL",
     )
 
-    parser.add_argument(
+    crawl_parser.add_argument(
         "--max-pages",
         type=int,
         help="Максимальное количество страниц",
     )
 
-    parser.add_argument(
+    crawl_parser.add_argument(
         "--max-depth",
         type=int,
         help="Максимальная глубина обхода",
     )
 
-    parser.add_argument(
+    crawl_parser.add_argument(
         "--output",
         help="JSON-файл со статистикой",
     )
 
-    parser.add_argument(
+    crawl_parser.add_argument(
         "--config",
         default="config.json",
         help="Путь к JSON-конфигурации",
     )
 
-    parser.add_argument(
+    crawl_parser.add_argument(
         "--respect-robots",
         action="store_true",
         help="Соблюдать robots.txt",
     )
 
-    parser.add_argument(
+    crawl_parser.add_argument(
         "--rate-limit",
         type=float,
         help="Лимит запросов в секунду",
+    )
+
+    subparsers.add_parser(
+        "day1",
+        help="Демонстрация последовательной и параллельной загрузки",
+    )
+
+    subparsers.add_parser(
+        "day2",
+        help="Демонстрация парсинга HTML",
+    )
+
+    subparsers.add_parser(
+        "day3",
+        help="Демонстрация очередей и конкурентности",
+    )
+
+    subparsers.add_parser(
+        "day4",
+        help="Демонстрация мониторинга",
+    )
+
+    subparsers.add_parser(
+        "day5",
+        help="Демонстрация retry и обработки ошибок",
+    )
+
+    subparsers.add_parser(
+        "day6",
+        help="Демонстрация storage",
     )
 
     return parser.parse_args()
@@ -885,9 +926,10 @@ async def demo_day7_sitemap(
         logger.info("Проверка robots.txt включена через CLI")
 
     if args.rate_limit is not None:
-        crawler.rate_limiter.requests_per_second = (
-            args.rate_limit
+        crawler.rate_limiter.set_requests_per_second(
+            args.rate_limit,
         )
+
         logger.info(
             "Лимит скорости задан через CLI: %s req/s",
             args.rate_limit,
@@ -952,18 +994,37 @@ async def demo_day7_sitemap(
         logger.info("HTTP-сессия crawler закрыта")
 
 async def main() -> None:
-    await demo_day1_loading()
-    await demo_day2_parsing()
-    await demo_day3_crawling()
-    await demo_day4_monitoring()
-    await demo_day5_retry_and_errors()
-    await demo_day6_storage()
+    args = parse_args()
 
     setup_logging()
 
-    args = parse_args()
+    if args.command == "crawl":
+        await demo_day7_sitemap(args)
+        return
 
-    await demo_day7_sitemap(args)
+    if args.command == "day1":
+        await demo_day1_loading()
+        return
+
+    if args.command == "day2":
+        await demo_day2_parsing()
+        return
+
+    if args.command == "day3":
+        await demo_day3_crawling()
+        return
+
+    if args.command == "day4":
+        await demo_day4_monitoring()
+        return
+
+    if args.command == "day5":
+        await demo_day5_retry_and_errors()
+        return
+
+    if args.command == "day6":
+        await demo_day6_storage()
+        return
 
 if __name__ == "__main__":
     asyncio.run(main())
